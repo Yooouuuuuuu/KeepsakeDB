@@ -65,8 +65,10 @@ ks.context("最近有什麼運動計畫")
 
 ## Status
 
-`0.0.1` — L1 implemented and tested (`pytest`). L2 and L3 are next; the Milvus Lite
-comparison is being run. Python ≥ 3.11, dependency: numpy.
+`0.0.1` — L1, L2 and L3 implemented and tested (`pytest`, 17 tests). Benchmarked against
+Milvus Lite 3.2.1 with identical bge-m3 vectors on a zh-TW companion corpus: at 10k memories,
+hybrid recall@5 **0.88 vs 0.78** and **2 ms vs 53 ms** per query; one file, 49 MB vs 83 MB
+([`docs/BENCHMARK.md`](docs/BENCHMARK.md)). Python ≥ 3.11, dependency: numpy.
 
 ```
 pip install -e ".[vec,jieba,pipeline]"      # optional extras
