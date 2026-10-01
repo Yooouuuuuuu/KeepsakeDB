@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # Windows consoles default to a legacy code page
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = build_parser().parse_args(argv)
     embedder = None
     if args.embedder:

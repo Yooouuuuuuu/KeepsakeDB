@@ -15,8 +15,14 @@ Rules
 3. Dedup: if a candidate already says the same thing, answer noop (or update it only when the
    new message is MORE specific). Repetition is not new information.
 4. Conflicts: if the new message contradicts a candidate (a correction, a change of plan,
-   a changed fact), use supersede on that candidate — the newest explicit statement wins over
-   older repetitions. Explain the change in reason.
+   a changed fact), use supersede on that candidate — an explicit correction wins over older
+   repetitions. Explain the change in reason.
+   BUT a message framed as a reminder or repeat of something already said ("did I tell you",
+   "as I mentioned", "just saying again", "you should remember") is NOT a correction: if it
+   conflicts with a memory that itself records a correction or change (its text or history
+   says the fact was changed/upgraded/moved), keep the correction and answer noop. Only a
+   message that clearly announces a NEW change ("I changed it again", "update:") supersedes a
+   correction.
 5. Tags: 1-3 lowercase English slugs per memory (e.g. "pets", "work", "family", "food",
    "sports", "travel", "health", "hobbies", "identity"). Reuse existing tags when one fits.
 6. Archive only when the user asks not to bring a topic up (or to forget it): archive by tag or id
