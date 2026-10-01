@@ -62,10 +62,19 @@ ks.context("最近有什麼運動計畫")
   another (0.40) unless BM25 also matched. Calibrate per embedder.
 - **Embedder and memory language travel together**: a zh-TW store needs an embedder that
   covers Chinese (bge-m3 does). Switching embedders = `ks.reembed(new)`.
+- **Nothing is lost**: every write is in `history`, every search hit with its scores in
+  `search_log`, every pipeline decision in `pipeline_log`, all in the same file; an
+  operational logger (`configure_logging`) for the rest. `ks.explain(query)` shows the fusion math.
+- **One owner, many readers**: the writing process sets `owner=True`; others read the file
+  under WAL and send deletes/archives through the built-in command queue.
+- **Backups**: `ks.snapshot()` — consistent live copies, text-only option, Anki-style rotation,
+  `ks.restore(path)`.
+- **CLI**: `keepsake --db her.db stats | list | search "…" --explain | log | delete 42 | backup`.
 
 ## Status
 
-`0.0.1` — L1, L2 and L3 implemented and tested (`pytest`, 17 tests). Benchmarked against
+`0.1.0` — L1, L2 and L3 implemented and tested (`pytest`), with logs, the command queue,
+backups and the CLI ([`CHANGELOG.md`](CHANGELOG.md)). Benchmarked against
 Milvus Lite 3.2.1 with identical bge-m3 vectors on a zh-TW companion corpus: at 10k memories,
 hybrid recall@5 **0.88 vs 0.78** and **2 ms vs 53 ms** per query; one file, 49 MB vs 83 MB
 ([`docs/BENCHMARK.md`](docs/BENCHMARK.md)). Python ≥ 3.11, dependency: numpy.

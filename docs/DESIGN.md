@@ -75,6 +75,52 @@ operation (user-commanded purge); history keeps the text.
 drop=0.40, oversample=3)`. Thresholds are per-embedder and should be calibrated on real score
 distributions (556's bge-m3 data: correct paraphrase hits 0.46–0.65, noise ≈ 0.39).
 
+### Logs (nothing is lost; negligible when on, zero when off)
+
+| stream | where | what | cost |
+|---|---|---|---|
+| `history` | table | every add / update / supersede / archive / unarchive / delete with old & new text and reason | one insert inside the write's own transaction |
+| `search_log` | table, `log_searches` (default on) | every hit of every search: rank, fused, dense, BM25, label, injected-or-not for `context()` | ≈ tens of µs per query under WAL, no extra fsync |
+| `pipeline_log` | table, `log_pipeline` (default on) | per observe: candidate ids shown, raw LLM reply, ops applied / skipped, error, model, ms (not the prompt) | one insert per turn |
+| operational | `logging.getLogger("keepsakedb")` | open/close, reindex, reembed, backups, commands, errors, **slow queries** over `slow_ms` | nothing unless a handler is attached (`configure_logging(path)` → JSON lines) |
+
+`log_retention_days` (90) prunes the two log tables and finished commands at open.
+`explain(query)` returns the fusion math for one query (never logged). `score_percentiles()`
+turns `search_log` into the calibration data for `high` / `drop`.
+
+### Ownership, the command queue, and other processes
+
+One process writes (`owner=True`): it holds the dense cache in RAM, drains the `commands`
+table before every search and on a timer (`start_owner_loop`), and publishes a heartbeat.
+Any other process (556d's memory page, the CLI) reads freely under WAL and sends writes as
+commands: `enqueue("delete", {"ids": [...]})` → the owner executes it → `wait_command` sees
+the result. A queued command also survives the owner being offline: it runs at the next
+drain. Supported: delete, archive, unarchive, backup, restore, reindex, reembed, ping.
+
+Safety net: every connection checks `PRAGMA data_version` (changes only when *another*
+connection commits) before a search and reloads the rows named in `history` since its last
+look, so even a direct write from elsewhere is visible within one query. `busy_timeout`
+(5 s) on every connection means SQLite-level contention never surfaces as an error.
+
+### Backups
+
+`backup(dest, include_embeddings=True)` uses SQLite's online backup API (consistent while
+live) and renames a temp file into place, so a synced folder only ever sees complete files.
+Text-only snapshots drop the vectors (≈ 80 % of the file); restoring one re-embeds.
+`snapshot()` writes `<name>-YYYYMMDD-HHMMSS[-text].db` into `backup_dir` and rotates
+Anki-style: newest per day for 7 days, per week for 4 weeks, per month for 12 months.
+With `backup_dir` set, a snapshot is taken on the first write of each day and before
+reindex / reembed / purge-by-tag / restore. `restore(path)` copies a snapshot into the open
+database in place (readers never see a torn file). Never copy a live `.db` by hand (its
+`-wal` file holds recent commits); keep the file on a local disk (WAL is unsafe on network
+shares). Whether `backup_dir` points at a synced cloud folder is the user's choice.
+
+### `keepsake` CLI
+
+`keepsake --db her.db stats | list | show ID | search Q [--explain] | tags | log | plog |
+delete | archive | unarchive | backup | restore | commands` (`--json` for machines,
+`--embedder URL` for the dense leg). Write commands go through the owner when one is alive.
+
 ## L2 — the pipeline
 
 `Pipeline(store, llm, PipelineConfig(language="zh-TW", max_candidates=8, consent_turns=100,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -93,18 +94,19 @@ class Pipeline:
     def observe(self, user_text: str, assistant_text: Optional[str] = None) -> ObserveResult:
         if self.cfg.prefilter is not None and not self.cfg.prefilter(user_text):
             return ObserveResult()
-        candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include")
+        t0 = time.perf_counter()
+        candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", _log=False)
         system = prompts.SYSTEM.format(language=self.cfg.language)
         user = prompts.build_user(user_text, assistant_text if self.cfg.user_facts_only else None,
                                   candidates, self.store.tags(include_archived=True))
         res = ObserveResult()
+        cand_ids = {m.id for m in candidates}
         try:
             res.raw = self.llm.complete(system, user)
             ops = extract_json(res.raw).get("ops", [])
         except Exception as e:  # LLM or JSON failure never breaks the turn
             res.error = f"{type(e).__name__}: {e}"
-            return res
-        cand_ids = {m.id for m in candidates}
+            ops = []
         for op in ops if isinstance(ops, list) else []:
             if not isinstance(op, dict):
                 continue
@@ -112,6 +114,10 @@ class Pipeline:
                 self._apply(op, cand_ids, res)
             except Exception as e:
                 res.skipped.append({**op, "why": f"{type(e).__name__}: {e}"})
+        ms = (time.perf_counter() - t0) * 1000
+        # pipeline log: candidates shown, the raw reply, what was applied/skipped — not the prompt
+        self.store.log_pipeline_run(user_text, sorted(cand_ids), res.raw, res.applied, res.skipped, res.error,
+                                    getattr(self.llm, "name", None), ms)
         return res
 
     def _apply(self, op: Dict[str, Any], cand_ids: set, res: ObserveResult) -> None:
