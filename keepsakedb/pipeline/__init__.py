@@ -95,6 +95,10 @@ class Pipeline:
         if self.cfg.prefilter is not None and not self.cfg.prefilter(user_text):
             return ObserveResult()
         t0 = time.perf_counter()
+        with self._lock:  # one observe at a time (the LLM call is outside the store lock)
+            return self._observe(user_text, assistant_text, t0)
+
+    def _observe(self, user_text: str, assistant_text: Optional[str], t0: float) -> ObserveResult:
         candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", _log=False)
         system = prompts.SYSTEM.format(language=self.cfg.language)
         user = prompts.build_user(user_text, assistant_text if self.cfg.user_facts_only else None,
@@ -151,6 +155,12 @@ class Pipeline:
             fn = self.store.archive if kind == "archive" else self.store.unarchive
             n = fn(ids=[int(mid)] if mid is not None and tag is None else None, tag=tag, reason=reason)
             res.applied.append({"op": kind, "tag": tag, "id": mid, "reason": reason, "count": n})
+        elif kind == "consent":
+            tag = _slug(op.get("tag", ""))
+            if not tag:
+                raise ValueError("consent needs a tag")
+            self.grant_consent(tag)  # opens the window from the next turn (observe runs after the reply)
+            res.applied.append({"op": "consent", "tag": tag, "turns": self.cfg.consent_turns})
         else:
             raise ValueError(f"unknown op {kind!r}")
 

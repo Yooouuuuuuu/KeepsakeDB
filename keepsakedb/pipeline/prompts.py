@@ -23,6 +23,9 @@ Rules
    with the user's reason. Unarchive when they say the topic is fine again.
 7. Small talk, questions to the assistant, and transient states ("I'm tired today") are noop
    unless they reveal a lasting fact (a chronic condition, a recurring habit).
+8. Consent: when a candidate is marked archived and the user now agrees to talk about that
+   topic ("yes, let's talk about it", "that's fine now"), emit consent for its tag so the
+   memories can be used for a while. Unarchive only when they say the topic is fine for good.
 
 Output format (JSON only, no prose):
 {{"ops": [
@@ -31,6 +34,7 @@ Output format (JSON only, no prose):
   {{"op": "supersede", "id": 12, "text": "...", "reason": "..."}},
   {{"op": "archive", "tag": "sports", "reason": "..."}}  |  {{"op": "archive", "id": 12, "reason": "..."}},
   {{"op": "unarchive", "tag": "sports"}},
+  {{"op": "consent", "tag": "sports"}},
   {{"op": "noop"}}
 ]}}"""
 

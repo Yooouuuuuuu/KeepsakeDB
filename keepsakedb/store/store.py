@@ -501,11 +501,12 @@ class Keepsake:
         if archived not in ("exclude", "include", "meta"):
             raise ValueError("archived must be exclude | include | meta")
         t0 = time.perf_counter()
-        self._before_read()
-        inc = archived != "exclude"
-        dense_leg, bm25_leg = self._legs(query, mode, k, legs_k, inc, tag, query_embedding, phrase)
-        ranked = fusion.top(self._fuse(mode, ranker, weights, norm, dense_leg, bm25_leg), k)
-        rows = self.get_many([mid for mid, _ in ranked])
+        with self._lock:  # one SQLite connection: serialize against writes from other threads
+            self._before_read()
+            inc = archived != "exclude"
+            dense_leg, bm25_leg = self._legs(query, mode, k, legs_k, inc, tag, query_embedding, phrase)
+            ranked = fusion.top(self._fuse(mode, ranker, weights, norm, dense_leg, bm25_leg), k)
+            rows = self.get_many([mid for mid, _ in ranked])
         d_scores, b_scores = dict(dense_leg), dict(bm25_leg)
         out: List[Memory] = []
         for mid, s in ranked:
@@ -536,12 +537,13 @@ class Keepsake:
         """The fusion math for one query: both legs with ranks and scores, the fused list,
         the FTS5 MATCH string and the thresholds. Not logged."""
         inc = archived != "exclude"
-        dense_leg, bm25_leg = self._legs(query, mode, k, legs_k, inc, tag, query_embedding, phrase)
-        fused = self._fuse(mode, ranker, weights, norm, dense_leg, bm25_leg)
-        d_rank, b_rank = fusion.ranks(dense_leg), fusion.ranks(bm25_leg)
-        d_s, b_s = dict(dense_leg), dict(bm25_leg)
-        top = fusion.top(fused, k)
-        rows = self.get_many([m for m, _ in top] + [m for m, _ in dense_leg] + [m for m, _ in bm25_leg])
+        with self._lock:
+            dense_leg, bm25_leg = self._legs(query, mode, k, legs_k, inc, tag, query_embedding, phrase)
+            fused = self._fuse(mode, ranker, weights, norm, dense_leg, bm25_leg)
+            d_rank, b_rank = fusion.ranks(dense_leg), fusion.ranks(bm25_leg)
+            d_s, b_s = dict(dense_leg), dict(bm25_leg)
+            top = fusion.top(fused, k)
+            rows = self.get_many([m for m, _ in top] + [m for m, _ in dense_leg] + [m for m, _ in bm25_leg])
         text = lambda mid: (rows[mid].text if mid in rows else "?")[:80]  # noqa: E731
         return {
             "query": query, "mode": mode, "ranker": ranker, "weights": list(weights) if ranker != "rrf" else None,
