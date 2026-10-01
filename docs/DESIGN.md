@@ -85,6 +85,9 @@ distributions (556's bge-m3 data: correct paraphrase hits 0.46–0.65, noise ≈
 | operational | `logging.getLogger("keepsakedb")` | open/close, reindex, reembed, backups, commands, errors, **slow queries** over `slow_ms` | nothing unless a handler is attached (`configure_logging(path)` → JSON lines) |
 
 `log_retention_days` (90) prunes the two log tables and finished commands at open.
+Host caveat: a host may silence Python logging globally (Hermes one-shot `-z` mode calls
+`logging.disable`), which mutes the operational stream only; the three SQLite streams are
+unaffected, which is why the facts live in the file and not in the log.
 `explain(query)` returns the fusion math for one query (never logged). `score_percentiles()`
 turns `search_log` into the calibration data for `high` / `drop`.
 
