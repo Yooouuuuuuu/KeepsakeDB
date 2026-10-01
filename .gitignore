@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+bench/out/
+bench/*.db
+bench/*.db-*
+bench/milvus_lite_data/
+*.log
+.pytest_cache/
