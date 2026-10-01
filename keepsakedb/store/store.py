@@ -47,7 +47,13 @@ CREATE TABLE IF NOT EXISTS history(
     old_text TEXT, new_text TEXT, reason TEXT, at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_history_mem ON history(memory_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(tokens, tokenize='unicode61');
+CREATE TABLE IF NOT EXISTS search_log(
+    id INTEGER PRIMARY KEY, at REAL NOT NULL, query TEXT NOT NULL, mode TEXT NOT NULL,
+    memory_id INTEGER NOT NULL, rank INTEGER NOT NULL, fused REAL, dense REAL, bm25 REAL,
+    label TEXT, injected INTEGER);
 """
+
+_LOG_COLS = ("id", "at", "query", "mode", "memory_id", "rank", "fused", "dense", "bm25", "label", "injected")
 
 _COLS = "id, text, tags, meta, archived, archive_reason, created_at, updated_at"
 
@@ -77,7 +83,10 @@ class Keepsake:
     def __init__(self, path: str, embedder=None, tokenizer: "str | Tokenizer" = "bigram",
                  dense_index: str = "numpy", dims: Optional[int] = None,
                  rrf_k: float = 60.0, high: float = 0.60, drop: float = 0.40,
-                 oversample: int = 3) -> None:
+                 oversample: int = 3, log_searches: bool = False) -> None:
+        """log_searches=True records every search/context hit with its dense, BM25 and fused
+        scores in the ``search_log`` table — the data for calibrating ``high``/``drop``
+        (``score_percentiles``)."""
         self.path = path
         self.embedder = embedder
         self.tok = get_tokenizer(tokenizer)
@@ -85,6 +94,7 @@ class Keepsake:
         self.high = high
         self.drop = drop
         self.oversample = oversample
+        self.log_searches = log_searches
         self._lock = threading.RLock()
         self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -381,13 +391,14 @@ class Keepsake:
         return self.dense.search(np.asarray(q, dtype=np.float32), k, include_archived, allowed)
 
     def search(self, query: str, k: int = 5, mode: str = "hybrid", ranker: str = "rrf",
-               weights: Tuple[float, float] = (0.5, 0.5), norm: str = "arctan",
+               weights: Tuple[float, float] = (0.5, 0.5), norm: str = "minmax",
                archived: str = "exclude", tag: Optional[str] = None,
                query_embedding: Optional[np.ndarray] = None, legs_k: Optional[int] = None,
-               phrase: bool = False) -> List[Memory]:
-        """mode: hybrid | dense | bm25.  archived: exclude | include | meta
-        (meta = archived hits come back with text withheld and label 'archived').
-        phrase=True makes the BM25 leg an exact-substring lookup (names, keywords)."""
+               phrase: bool = False, _log: bool = True) -> List[Memory]:
+        """mode: hybrid | dense | bm25.  ranker: rrf (default, rank-based, no weights) |
+        weighted (weights = dense/BM25 shares; norm minmax | arctan | none).
+        archived: exclude | include | meta (meta = archived hits come back with text withheld
+        and label 'archived').  phrase=True makes the BM25 leg an exact-substring lookup."""
         if archived not in ("exclude", "include", "meta"):
             raise ValueError("archived must be exclude | include | meta")
         inc = archived != "exclude"
@@ -421,6 +432,8 @@ class Keepsake:
             elif m.dense is not None and m.dense >= self.high:
                 m.label = "high"
             out.append(m)
+        if self.log_searches and _log:
+            self._log_search(query, mode, out, None)
         return out
 
     def context(self, query: str, k: int = 5, title: str = "Long-term memory", **kw) -> str:
@@ -428,21 +441,53 @@ class Keepsake:
         ``drop`` is filtered unless the BM25 leg also matched; archived hits appear as
         meta-info only so the agent can ask for consent instead of reciting them."""
         kw.setdefault("archived", "meta")
-        hits = self.search(query, k, **kw)
+        hits = self.search(query, k, _log=False, **kw)
         lines = []
+        injected: Set[int] = set()
         for m in hits:
             if m.label == "archived":
                 topic = "/".join(t for t in m.tags if t != "archived") or "untagged"
                 reason = f" — {m.archive_reason}" if m.archive_reason else ""
                 lines.append(f"- [archived: {topic}{reason} — contents withheld; offer to discuss]")
+                injected.add(m.id)
                 continue
             if m.dense is not None and m.dense < self.drop and m.bm25 is None:
                 continue
             tag_s = f" (tags: {', '.join(m.tags)})" if m.tags else ""
             lines.append(f"- {'[high] ' if m.label == 'high' else ''}{m.text}{tag_s}")
+            injected.add(m.id)
+        if self.log_searches:
+            self._log_search(query, "context", hits, injected)
         if not lines:
             return ""
         return f"{title}:\n" + "\n".join(lines)
+
+    # ------------------------------------------------------------ score log
+    def _log_search(self, query: str, mode: str, hits: List[Memory], injected: Optional[Set[int]]) -> None:
+        now = time.time()
+        with self._lock, self.conn:
+            self.conn.executemany(
+                "INSERT INTO search_log(at, query, mode, memory_id, rank, fused, dense, bm25, label, injected)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [(now, query, mode, m.id, r, m.score, m.dense, m.bm25, m.label,
+                  None if injected is None else int(m.id in injected)) for r, m in enumerate(hits, 1)])
+
+    def search_log(self, limit: int = 1000, since: Optional[float] = None) -> List[Dict[str, Any]]:
+        q = f"SELECT {', '.join(_LOG_COLS)} FROM search_log{' WHERE at >= ?' if since else ''} ORDER BY id DESC LIMIT ?"
+        params: List[Any] = ([since] if since else []) + [limit]
+        return [dict(zip(_LOG_COLS, r)) for r in self.conn.execute(q, params)]
+
+    def score_percentiles(self, field: str = "dense", since: Optional[float] = None,
+                          injected_only: bool = False, label: Optional[str] = None) -> Dict[str, float]:
+        """Distribution of logged scores — the input for setting ``high``/``drop``."""
+        rows = self.search_log(limit=10 ** 9, since=since)
+        vals = sorted(r[field] for r in rows if r[field] is not None
+                      and (not injected_only or r["injected"]) and (label is None or r["label"] == label))
+        if not vals:
+            return {}
+        pick = lambda p: vals[min(len(vals) - 1, int(round(p / 100 * (len(vals) - 1))))]  # noqa: E731
+        return {"n": len(vals), "min": vals[0], "p10": pick(10), "p25": pick(25), "p50": pick(50),
+                "p75": pick(75), "p90": pick(90), "max": vals[-1]}
 
     def similar(self, text: str, k: int = 5, embedding: Optional[np.ndarray] = None) -> List[Memory]:
         """Candidates for dedup / conflict checks (used by L2): hybrid over active memories."""

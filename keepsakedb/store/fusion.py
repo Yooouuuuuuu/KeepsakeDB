@@ -4,7 +4,10 @@ RRF:      score(d) = sum_i 1 / (k + rank_i(d)), rank 1-based, k = 60 by default
           (Milvus RRFRanker default; the docs recommend k in [10, 100]).
 Weighted: score(d) = sum_i w_i * norm_i(score_i(d)).
           Milvus Standalone normalizes with arctan (unbounded BM25 -> [0, 1));
-          Milvus Lite 3.2 uses per-query min-max. Both are available here.
+          Milvus Lite 3.2 uses per-query min-max. Both are available here; min-max is the
+          default because it won the fusion sweep (docs/BENCHMARK.md): arctan squashes
+          BM25 scores (typically 5-15) into a flat 0.9-0.98 band, so the BM25 leg stops
+          discriminating.
 """
 from __future__ import annotations
 
@@ -22,7 +25,7 @@ def rrf(legs: Sequence[Leg], k: float = 60.0) -> Dict[int, float]:
     return out
 
 
-def weighted(legs: Sequence[Leg], weights: Sequence[float], norm: str = "arctan") -> Dict[int, float]:
+def weighted(legs: Sequence[Leg], weights: Sequence[float], norm: str = "minmax") -> Dict[int, float]:
     if len(weights) != len(legs):
         raise ValueError("one weight per leg")
     out: Dict[int, float] = {}

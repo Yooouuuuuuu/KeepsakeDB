@@ -90,3 +90,21 @@ def test_bm25_only_store(tmp_path):
     assert k.search("LOL", k=1)[0].dense is None
     assert k.search("線上遊戲", k=1)[0].bm25 > 0
     k.close()
+
+
+def test_score_logging_for_calibration(tmp_path):
+    k = Keepsake(str(tmp_path / "l.db"), embedder=HashEmbedder(16), log_searches=True)
+    for text, tags in FACTS:
+        k.add(text, tags)
+    k.search("麻辣鍋", k=3)
+    block = k.context("Gogoro", k=3)
+    rows = k.search_log()
+    assert {r["mode"] for r in rows} == {"hybrid", "context"}
+    ctx_rows = [r for r in rows if r["mode"] == "context"]
+    assert all(r["injected"] in (0, 1) for r in ctx_rows) and any(r["injected"] == 1 for r in ctx_rows)
+    assert all(r["injected"] is None for r in rows if r["mode"] == "hybrid")
+    p = k.score_percentiles("dense")
+    assert p["n"] == len(rows) and p["min"] <= p["p50"] <= p["max"]
+    assert k.score_percentiles("bm25", injected_only=True)["n"] >= 1
+    assert k.score_percentiles("dense", label="archived") == {}
+    k.close()

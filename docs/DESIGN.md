@@ -45,11 +45,18 @@ The tokenizer is recorded in `meta`; `reindex()` switches it.
 ```
 dense leg  : cosine top-(k·oversample) over normalized vectors (numpy matrix or sqlite-vec)
 bm25 leg   : FTS5 bm25() top-(k·oversample), global statistics, k1 = 1.2, b = 0.75
-fusion     : RRF  score = Σ 1/(60 + rank)        (Milvus RRFRanker default)
-             or weighted Σ wᵢ·normᵢ(score)        (arctan like Standalone, or min-max like Lite)
+fusion     : RRF  score = Σ 1/(60 + rank)        (Milvus RRFRanker default; no leg weights — by rank)
+             or weighted Σ wᵢ·normᵢ(score)        (min-max default — won the sweep; arctan like Standalone)
 filters    : archived state (exclude | include | meta), tag
 labels     : [high] when cosine ≥ high (0.60); dropped when < drop (0.40) unless BM25 matched
+logging    : log_searches=True records every hit's dense/BM25/fused score + whether it was injected
+             (search_log table; score_percentiles() for calibrating high/drop on real traffic)
 ```
+
+Defaults are benchmark-backed (`docs/BENCHMARK.md`): RRF beats every dense-heavy weighting
+once the store has thousands of memories; the document-RAG habit of 0.7–0.8 dense does not
+transfer to one-line facts. `high`/`drop` are the only quality knobs still uncalibrated — turn on
+`log_searches` for the first real run and set them from the distribution.
 
 `context(query)` renders the injection block. Archived hits appear as meta-info only:
 `[archived: sports — user finds it painful — contents withheld; offer to discuss]`.
@@ -115,6 +122,10 @@ must cover the memory language.
 
 ## Not in scope (deliberately)
 
+- A reranker in the per-turn path — measured (`docs/BENCHMARK.md`): a cross-encoder reorders
+  hybrid's top-5 (+R@1) without improving what gets injected (R@5), for ≈ 0.5 s of CPU per turn;
+  it cannot rescue dense-only or BM25-only retrieval. LLM judgement over candidates lives in L2's
+  background observe pass instead.
 - Curated "head" memory (always-injected top facts) — that is the agent's own file (Hermes
   `MEMORY.md`); L1 is the long tail.
 - Verbatim transcripts — the agent's session store already has them (Hermes FTS5 sessions).

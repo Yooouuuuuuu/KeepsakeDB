@@ -10,3 +10,4 @@ bench/*.db-*
 bench/milvus_lite_data/
 *.log
 .pytest_cache/
+bench/models/

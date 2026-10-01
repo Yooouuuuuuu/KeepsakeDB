@@ -88,6 +88,37 @@ What the numbers say:
    becomes an OR term; bigram queries are cheaper and better.
 5. Build and file size favour SQLite (1.5 s / 49 MB vs 4.7 s / 83 MB).
 
+## Fusion sweep (which "percentage" of BM25?)
+
+`bench/sweep_fusion.py` on the cached vectors, 40 probes (one probe = 0.025). RRF has no
+percentage — it fuses by rank — so a dense share only exists for weighted score fusion.
+
+| 10 035 docs, over-fetch 15 | dense share | R@5 | MRR |
+|---|---:|---:|---:|
+| dense only | 1.0 | 0.700 | 0.671 |
+| BM25 only | 0.0 | 0.675 | 0.658 |
+| RRF k=60 (default) | rank-based | 0.875 | 0.813 |
+| RRF k=10 | rank-based | 0.900 | 0.818 |
+| weighted min-max | 0.5 | 0.875 | **0.850** |
+| weighted min-max | 0.6 | 0.875 | 0.776 |
+| weighted min-max | 0.7 | 0.800 | 0.713 |
+| weighted min-max | 0.9 | 0.725 | 0.690 |
+| weighted arctan | 0.5 | 0.775 | 0.720 |
+| weighted arctan | 0.7 | 0.800 | 0.751 |
+| weighted RRF (w/(k+rank)) | 0.7 | 0.775 | 0.733 |
+
+At 1 035 docs dense-heavy min-max (0.6–0.8) is best (0.875 vs RRF 0.80); at 10 035 every
+dense-leaning variant collapses toward dense-only. Over-fetch 30 instead of 15 is slightly worse
+for RRF at 10k (0.825 vs 0.875). Conclusions, applied as defaults:
+
+- **RRF k=60 stays the default** (k=10 is one probe better — noise; 60 is the Milvus/Azure/Elastic
+  default). `oversample=3` stays.
+- The usual document-RAG weighting (0.7–0.8 dense; e.g. Anthropic's contextual-retrieval recipe
+  uses 0.8/0.2) is wrong for memories: one-line facts hinge on names and numbers that embeddings
+  blur, and here dense degrades as fast as BM25 with store size, so the legs are equals.
+- **Weighted fusion now defaults to min-max normalization**: arctan squashes BM25 scores (≈5–15)
+  into a flat 0.9–0.98 band and the BM25 leg stops discriminating (0.775 vs 0.875 at a 0.5 share).
+
 ## The IDF experiment (segment-local statistics)
 
 `bench/bench_idf.py`, 30 035 docs (three memtable flushes in Milvus Lite), 38 probes with a non-empty
@@ -107,6 +138,37 @@ globally best memory is pushed to third place on average. FTS5 reproduces global
 the top (38/38, rank 1.00); its lower top-10 overlap in bigram mode is tie ordering in the tail
 (many distractors share the same bigrams and scores), not a ranking error. Insert of 30k rows:
 Milvus Lite 3.2 s, FTS5 jieba 2.5 s, FTS5 bigram 1.2 s.
+
+## Reranking on top of hybrid (is it worth it?)
+
+`bench/bench_rerank.py`, 10 035 docs. Candidates from KeepsakeDB, then re-ordered by a
+cross-encoder (bge-reranker-v2-m3 Q8_0 GGUF on llama-server, CPU) or by an LLM
+(gemini-3.8-flash through the local proxy, JSON ranking of the 15 candidates).
+
+| variant | R@1 | R@5 | MRR | rerank cost p50 (p95) |
+|---|---:|---:|---:|---:|
+| hybrid@15 → top-5 (today) | 0.775 | **0.875** | 0.813 | 0 |
+| hybrid@15 → cross-encoder → top-5 | 0.850 | 0.850 | 0.850 | 478 ms (568) |
+| hybrid@30 → cross-encoder → top-5 | 0.825 | 0.850 | 0.838 | 955 ms (1 201) |
+| dense@15 → cross-encoder → top-5 | 0.750 | 0.750 | 0.750 | 483 ms |
+| BM25@15 → cross-encoder → top-5 | 0.700 | 0.700 | 0.700 | 410 ms |
+| hybrid@15 → LLM rerank → top-5 | 0.900 | 0.900 | 0.900 | 9 098 ms (16 556) |
+
+Reading:
+
+1. **A reranker cannot replace hybrid.** Reranking dense-only or BM25-only candidates lands at
+   0.75 / 0.70 — below plain hybrid (0.875). Whatever hybrid fails to *fetch*, no reranker can
+   recover; retrieval breadth is the whole game.
+2. **On top of hybrid it reorders, it does not add.** The cross-encoder lifts R@1 (0.775 → 0.85)
+   and MRR, and loses one probe at R@5. For prompt injection the model reads all five memories,
+   so membership (R@5) is what matters and order barely does.
+3. **Cost**: ≈ 0.5 s per turn on CPU for 15 candidates (1 s for 30), on the same CPU/GPU budget
+   the chat model and TTS will need; the LLM rerank is 9 s. Against a 2 ms retrieval.
+
+Decision: **no reranker in the per-turn path.** The L2 pipeline already performs an LLM pass
+over the candidates once per turn *in the background* (observe), which is where LLM judgement
+about memories belongs — latency does not matter there. A reranker hook stays a possible
+option for a future "exact fact lookup" tool where only the top-1 is used.
 
 ## Verdict for the SQLite trial
 
