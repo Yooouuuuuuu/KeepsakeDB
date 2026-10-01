@@ -73,9 +73,10 @@ class Pipeline:
 
     def context_for(self, user_text: str, k: Optional[int] = None, title: str = "Long-term memory") -> str:
         k = k or self.cfg.context_k
-        hits = self.store.search(user_text, k=k, archived="include")
+        hits = self.store.search(user_text, k=k, archived="include", _log=False)
         open_tags = set(self.consented_tags())
         lines = []
+        injected = set()
         for m in hits:
             if m.superseded:
                 continue  # a corrected fact is never injected, consent or not
@@ -83,11 +84,15 @@ class Pipeline:
                 topic = "/".join(m.tags) or "untagged"
                 reason = f" — {m.archive_reason}" if m.archive_reason else ""
                 lines.append(f"- [archived: {topic}{reason} — contents withheld; offer to discuss]")
+                injected.add(m.id)
                 continue
             if m.dense is not None and m.dense < self.store.drop and m.bm25 is None:
                 continue
             tag_s = f" (tags: {', '.join(m.tags)})" if m.tags else ""
             lines.append(f"- {'[high] ' if m.label == 'high' else ''}{m.text}{tag_s}")
+            injected.add(m.id)
+        if self.store.log_searches:  # the calibration data: every candidate, and which ones were injected
+            self.store._log_search(user_text, "context", hits, injected)
         return f"{title}:\n" + "\n".join(lines) if lines else ""
 
     # ------------------------------------------------------------ write side
