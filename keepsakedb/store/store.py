@@ -597,58 +597,6 @@ class Keepsake:
             return ""
         return f"{title}:\n" + "\n".join(lines)
 
-    # ------------------------------------------------------------ recent layer
-    RECENT_TAG = "recent"
-
-    def add_exchange(self, surface: str, user_text: str, assistant_text: str, ttl_hours: float = 24.0,
-                     max_user: int = 200, max_assistant: int = 300, subject: str = "製作人",
-                     self_name: str = "她") -> int:
-        """Episodic record of one exchange (no LLM): what was asked and answered, where, when.
-        Tagged `recent` + the surface; archived as 'decay' after ttl (sweep_recent). Lets her
-        remember a conversation held on another surface the way a person would."""
-        u = " ".join(user_text.split())[:max_user]
-        a = " ".join(assistant_text.split())[:max_assistant]
-        text = f"{subject}在{surface}問：{u}｜{self_name}答：{a}"
-        now = time.time()
-        return self.add(text, tags=[self.RECENT_TAG, f"surface:{surface}"],
-                        meta={"kind": "exchange", "surface": surface, "at": now, "expires": now + ttl_hours * 3600})
-
-    def recent(self, limit: int = 3, exclude_surface: Optional[str] = None, include_expired: bool = False) -> List[Memory]:
-        """Newest live exchanges, optionally from other surfaces only."""
-        rows = [self._row(r) for r in self.conn.execute(
-            f"SELECT {_COLS} FROM memories m WHERE m.archived = 0 AND EXISTS "
-            "(SELECT 1 FROM memory_tags t WHERE t.memory_id = m.id AND t.tag = ?) ORDER BY m.id DESC LIMIT ?",
-            (self.RECENT_TAG, max(limit * 4, 20)))]
-        now = time.time()
-        out = []
-        for m in rows:
-            if exclude_surface and m.meta.get("surface") == exclude_surface:
-                continue
-            if not include_expired and float(m.meta.get("expires", 0) or 0) < now:
-                continue
-            out.append(m)
-            if len(out) >= limit:
-                break
-        return out
-
-    def sweep_recent(self, purge_after_days: float = 7.0) -> Dict[str, int]:
-        """Archive expired exchanges (reason 'decay'); hard-delete decayed ones older than N days."""
-        now = time.time()
-        rows = self.conn.execute(
-            f"SELECT {_COLS} FROM memories m WHERE EXISTS (SELECT 1 FROM memory_tags t WHERE t.memory_id = m.id AND t.tag = ?)",
-            (self.RECENT_TAG,)).fetchall()
-        decay, purge = [], []
-        for r in rows:
-            m = self._row(r)
-            exp = float(m.meta.get("expires", 0) or 0)
-            if not m.archived and exp and exp < now:
-                decay.append(m.id)
-            if m.archived and m.created_at < now - purge_after_days * 86400:
-                purge.append(m.id)
-        n1 = self.archive(decay, reason="decay") if decay else 0
-        n2 = self.delete(purge, reason="recent purge") if purge else 0
-        return {"decayed": n1, "purged": n2}
-
     def similar(self, text: str, k: int = 5, embedding: Optional[np.ndarray] = None) -> List[Memory]:
         """Candidates for dedup / conflict checks (used by L2): hybrid over active memories."""
         return self.search(text, k, mode="hybrid", query_embedding=embedding)
@@ -773,12 +721,6 @@ class Keepsake:
         with self._lock:
             self._check_external_changes()
             self._heartbeat()
-            if time.time() - getattr(self, "_last_sweep", 0.0) > 300:
-                self._last_sweep = time.time()
-                try:
-                    self.sweep_recent()
-                except Exception:
-                    log.exception("sweep_recent")
             n = 0
             for cmd in self.pending_commands():
                 try:

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 — 2026-10-02
+
+- **Removed the recent-exchange layer** (added in 0.1.2). Recording every turn in the store mixed two
+  different things: conversation history (verbatim, short-lived, the agent's session store already keeps
+  it across restarts) and memory (facts the pipeline judged worth keeping). The store is memory only
+  again; `search(..., exclude_tags=)` stays as a generic option.
+
 ## 0.1.2 — 2026-10-02
 
 - **Recent-exchange layer** for cross-surface continuity: `add_exchange(surface, q, a)` records one
