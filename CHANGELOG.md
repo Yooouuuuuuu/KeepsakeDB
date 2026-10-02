@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2 — 2026-10-02
+
+- **Recent-exchange layer** for cross-surface continuity: `add_exchange(surface, q, a)` records one
+  turn without an LLM (tags `recent` + `surface:<s>`, 24 h TTL in meta); `recent(limit,
+  exclude_surface)`; `sweep_recent()` archives expired ones as `decay` and purges after 7 days
+  (run by the owner loop every 300 s). `search(..., exclude_tags=)`.
+- Pipeline: `PipelineConfig(surface, recent_k, recent_ttl_hours, self_name)` — `context_for`
+  prepends `[recent HH:MM]` exchanges from OTHER surfaces and excludes `recent` from hits and
+  from L2 candidates; `observe` records the exchange after the LLM pass.
+
 ## 0.1.1 — 2026-10-02
 
 - L2 pipeline retries once (configurable) when the LLM reply is empty or not JSON — found in the
