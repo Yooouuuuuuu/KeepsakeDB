@@ -77,3 +77,15 @@ def test_agent_memory_background(tmp_path):
     assert "不吃香菜" in mem.before_turn("晚餐加香菜可以嗎")
     mem.end_session()
     ks.close()
+
+
+def test_observe_retries_once_on_empty_reply(tmp_path):
+    ks = Keepsake(str(tmp_path / "r.db"), embedder=HashEmbedder(8))
+    llm = ScriptedLLM(["", ops({"op": "add", "text": "使用者要去東京十天", "tags": ["travel"]})])
+    p = Pipeline(ks, llm, PipelineConfig(retry_delay_s=0))
+    r = p.observe("日本行程改了喔，東京那趟從一週改成十天")
+    assert r.error is None and r.applied[0]["op"] == "add" and len(llm.calls) == 2
+    p2 = Pipeline(ks, ScriptedLLM(["", ""]), PipelineConfig(retry_delay_s=0))
+    r2 = p2.observe("再說一次")
+    assert r2.applied == [] and "after 2 attempts" in r2.error
+    ks.close()

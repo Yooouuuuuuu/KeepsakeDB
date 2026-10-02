@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-10-02
+
+- L2 pipeline retries once (configurable) when the LLM reply is empty or not JSON — found in the
+  556 endurance run, where one transient empty reply silently dropped the only mention of a fact.
+- Pipeline `consent` op (opens a consent window for an archived tag); reads serialized against
+  writes on the shared connection; `context_for` logs candidates with the injected flag.
+- Verified in 556: 100 rounds 19/20, exam 20/20 on a 483-round store, 932-round store with
+  lossless observes and a direct engine recall of 18/20 (both misses explained).
+
 ## 0.1.0 — 2026-10-02
 
 Operations, after the design discussions.

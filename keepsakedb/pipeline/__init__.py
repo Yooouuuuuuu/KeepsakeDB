@@ -33,6 +33,8 @@ class PipelineConfig:
     context_k: int = 5
     prefilter: Optional[Callable[[str], bool]] = None  # return False to skip the LLM (regex, length...)
     user_facts_only: bool = True
+    retries: int = 1              # extra attempts when the LLM reply is empty / not JSON (transient backend glitches)
+    retry_delay_s: float = 2.0
 
 
 @dataclass
@@ -110,12 +112,18 @@ class Pipeline:
                                   candidates, self.store.tags(include_archived=True))
         res = ObserveResult()
         cand_ids = {m.id for m in candidates}
-        try:
-            res.raw = self.llm.complete(system, user)
-            ops = extract_json(res.raw).get("ops", [])
-        except Exception as e:  # LLM or JSON failure never breaks the turn
-            res.error = f"{type(e).__name__}: {e}"
-            ops = []
+        ops: list = []
+        for attempt in range(1 + max(0, self.cfg.retries)):
+            try:
+                res.raw = self.llm.complete(system, user)
+                ops = extract_json(res.raw).get("ops", [])
+                res.error = None
+                break
+            except Exception as e:  # LLM or JSON failure never breaks the turn; retry once for glitches
+                res.error = f"{type(e).__name__}: {e}" + (f" (after {attempt + 1} attempts)" if attempt else "")
+                ops = []
+                if attempt < self.cfg.retries:
+                    time.sleep(self.cfg.retry_delay_s)
         for op in ops if isinstance(ops, list) else []:
             if not isinstance(op, dict):
                 continue
