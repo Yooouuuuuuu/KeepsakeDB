@@ -37,6 +37,10 @@ class PipelineConfig:
     subject: Optional[str] = None  # fixed subject word for memories about the user (e.g. 製作人); recorded in the store
     user_name: Optional[str] = None  # the user's current name (prompt-layer only; never the stored subject)
     retries: int = 1              # extra attempts when the LLM reply is empty / not JSON (transient backend glitches)
+    surface: str = ""             # where THIS pipeline runs (app / Telegram …) — recent exchanges from other surfaces get injected
+    recent_k: int = 3             # how many cross-surface exchanges to show (0 = off)
+    recent_ttl_hours: float = 24.0
+    self_name: str = "她"         # her name in exchange records
     retry_delay_s: float = 2.0
 
 
@@ -89,10 +93,15 @@ class Pipeline:
 
     def context_for(self, user_text: str, k: Optional[int] = None, title: str = "Long-term memory") -> str:
         k = k or self.cfg.context_k
-        hits = self.store.search(user_text, k=k, archived="include", _log=False)
+        hits = self.store.search(user_text, k=k, archived="include", exclude_tags=[self.store.RECENT_TAG], _log=False)
         open_tags = set(self.consented_tags())
         lines = []
         injected = set()
+        if self.cfg.recent_k:
+            for m in self.store.recent(self.cfg.recent_k, exclude_surface=self.cfg.surface or None):
+                when = time.strftime("%H:%M", time.localtime(float(m.meta.get("at", m.created_at))))
+                lines.append(f"- [recent {when}] {m.text}")
+                injected.add(m.id)
         for m in hits:
             if m.superseded:
                 continue  # a corrected fact is never injected, consent or not
@@ -120,7 +129,8 @@ class Pipeline:
             return self._observe(user_text, assistant_text, t0)
 
     def _observe(self, user_text: str, assistant_text: Optional[str], t0: float) -> ObserveResult:
-        candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", _log=False)
+        candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include",
+                                       exclude_tags=[self.store.RECENT_TAG], _log=False)
         name_hint = (prompts.NAME_HINT.format(user_name=self.cfg.user_name, subject=self.subject or "the user")
                      if self.cfg.user_name else "")
         subject_rule = prompts.SUBJECT_RULE.format(subject=self.subject, name_hint=name_hint) if self.subject else ""
@@ -148,6 +158,12 @@ class Pipeline:
                 self._apply(op, cand_ids, res)
             except Exception as e:
                 res.skipped.append({**op, "why": f"{type(e).__name__}: {e}"})
+        if self.cfg.surface and assistant_text:
+            try:
+                self.store.add_exchange(self.cfg.surface, user_text, assistant_text, ttl_hours=self.cfg.recent_ttl_hours,
+                                        subject=self.subject or "製作人", self_name=self.cfg.self_name)
+            except Exception as e:
+                res.skipped.append({"op": "exchange", "why": f"{type(e).__name__}: {e}"})
         ms = (time.perf_counter() - t0) * 1000
         # pipeline log: candidates shown, the raw reply, what was applied/skipped — not the prompt
         self.store.log_pipeline_run(user_text, sorted(cand_ids), res.raw, res.applied, res.skipped, res.error,

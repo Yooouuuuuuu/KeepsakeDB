@@ -107,3 +107,22 @@ def test_subject_marker_is_a_store_constant(tmp_path):
     Pipeline(ks2, llm2).observe("hi")
     assert "«" not in llm2.calls[0][0]  # no subject configured: rule absent
     ks.close(); ks2.close()
+
+
+def test_recent_exchanges_cross_surface(tmp_path):
+    ks = Keepsake(str(tmp_path / "x.db"), embedder=HashEmbedder(8))
+    app = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(surface="事務所", self_name="真音"))
+    tg = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(surface="Telegram", self_name="真音"))
+    app.observe("今天星期幾？", "今天是星期五喔。")
+    # the app itself does not get its own exchange back; Telegram does
+    assert "[recent" not in app.context_for("我剛剛問了什麼")
+    block = tg.context_for("我之前有問妳甚麼嗎？")
+    assert "[recent" in block and "星期五" in block and "事務所" in block
+    # exchanges never become L2 candidates or ordinary hits
+    assert all("recent" not in m.tags for m in ks.search("星期幾", k=5, exclude_tags=["recent"]))
+    assert len(ks.recent()) == 1 and ks.recent(exclude_surface="事務所") == []
+    # decay: expire it and sweep
+    ks.conn.execute("UPDATE memories SET meta = json_set(meta, '$.expires', 1)")
+    r = ks.sweep_recent()
+    assert r["decayed"] == 1 and ks.recent() == [] and "[recent" not in tg.context_for("我之前有問妳甚麼嗎？")
+    ks.close()
