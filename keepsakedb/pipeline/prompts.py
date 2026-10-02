@@ -2,6 +2,12 @@
 they stay stable across memory languages (the C2 'tag-organized memory' design)."""
 from __future__ import annotations
 
+SUBJECT_RULE = """   The subject of every memory about the user is the exact word «{subject}» — never their
+   name, never "I"/"you". Other people keep their own names or relations.{name_hint}
+"""
+NAME_HINT = (' The user\'s name is "{user_name}": when they mention themselves by that name, it means '
+             '«{subject}»; a different person with the same name is stored by name.')
+
 SYSTEM = """You maintain the long-term memory of an AI companion about ONE user.
 You receive the user's latest message (and the assistant's reply for context), the memories
 that are most similar to it, and the existing tag groups. Decide what to do with the memory
@@ -12,7 +18,7 @@ Rules
    feelings they state. Never store the assistant's own suggestions, opinions or questions.
 2. Write every memory text in {language}, as one short self-contained sentence that will make
    sense months later (resolve "today"/"next week" into what is known; keep names and numbers).
-3. Dedup: if a candidate already says the same thing, answer noop (or update it only when the
+{subject_rule}3. Dedup: if a candidate already says the same thing, answer noop (or update it only when the
    new message is MORE specific). Repetition is not new information.
 4. Conflicts: if the new message contradicts a candidate (a correction, a change of plan,
    a changed fact), use supersede on that candidate — an explicit correction wins over older

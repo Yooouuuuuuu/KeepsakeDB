@@ -89,3 +89,19 @@ def test_observe_retries_once_on_empty_reply(tmp_path):
     r2 = p2.observe("再說一次")
     assert r2.applied == [] and "after 2 attempts" in r2.error
     ks.close()
+
+
+def test_subject_marker_is_a_store_constant(tmp_path):
+    ks = Keepsake(str(tmp_path / "s.db"), embedder=HashEmbedder(8))
+    llm = ScriptedLLM([ops({"op": "noop"})])
+    p = Pipeline(ks, llm, PipelineConfig(subject="製作人", user_name="承宇"))
+    p.observe("我叫承宇")
+    system = llm.calls[0][0]
+    assert "«製作人»" in system and '"承宇"' in system and ks._meta("subject") == "製作人"
+    p2 = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(subject="使用者"))
+    assert p2.subject == "製作人"  # the store's marker wins
+    ks2 = Keepsake(str(tmp_path / "n.db"), embedder=HashEmbedder(8))
+    llm2 = ScriptedLLM([ops({"op": "noop"})])
+    Pipeline(ks2, llm2).observe("hi")
+    assert "«" not in llm2.calls[0][0]  # no subject configured: rule absent
+    ks.close(); ks2.close()

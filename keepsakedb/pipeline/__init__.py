@@ -8,6 +8,7 @@ context_for(text)  the injection block; archived groups show as meta-info only, 
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -33,6 +34,8 @@ class PipelineConfig:
     context_k: int = 5
     prefilter: Optional[Callable[[str], bool]] = None  # return False to skip the LLM (regex, length...)
     user_facts_only: bool = True
+    subject: Optional[str] = None  # fixed subject word for memories about the user (e.g. 製作人); recorded in the store
+    user_name: Optional[str] = None  # the user's current name (prompt-layer only; never the stored subject)
     retries: int = 1              # extra attempts when the LLM reply is empty / not JSON (transient backend glitches)
     retry_delay_s: float = 2.0
 
@@ -53,6 +56,18 @@ class Pipeline:
         self._turn = 0
         self._consent: Dict[str, int] = {}  # tag -> turn at which the window closes
         self._lock = threading.Lock()
+        # the subject marker is a per-store constant: the store's record wins over the config
+        stored = store._meta("subject")
+        if stored:
+            if self.cfg.subject and self.cfg.subject != stored:
+                logging.getLogger("keepsakedb").warning(
+                    "subject %r configured but the store uses %r; keeping the store's", self.cfg.subject, stored)
+            self.subject = stored
+        else:
+            self.subject = self.cfg.subject
+            if self.subject:
+                with store._lock, store.conn:
+                    store._set_meta("subject", self.subject)
 
     # ------------------------------------------------------------- read side
     def turn(self) -> int:
@@ -107,7 +122,10 @@ class Pipeline:
 
     def _observe(self, user_text: str, assistant_text: Optional[str], t0: float) -> ObserveResult:
         candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", _log=False)
-        system = prompts.SYSTEM.format(language=self.cfg.language)
+        name_hint = (prompts.NAME_HINT.format(user_name=self.cfg.user_name, subject=self.subject or "the user")
+                     if self.cfg.user_name else "")
+        subject_rule = prompts.SUBJECT_RULE.format(subject=self.subject, name_hint=name_hint) if self.subject else ""
+        system = prompts.SYSTEM.format(language=self.cfg.language, subject_rule=subject_rule)
         user = prompts.build_user(user_text, assistant_text if self.cfg.user_facts_only else None,
                                   candidates, self.store.tags(include_archived=True))
         res = ObserveResult()
