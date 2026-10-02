@@ -58,16 +58,15 @@ class Pipeline:
         self._lock = threading.Lock()
         # the subject marker is a per-store constant: the store's record wins over the config
         stored = store._meta("subject")
-        if stored:
-            if self.cfg.subject and self.cfg.subject != stored:
-                logging.getLogger("keepsakedb").warning(
-                    "subject %r configured but the store uses %r; keeping the store's", self.cfg.subject, stored)
-            self.subject = stored
-        else:
-            self.subject = self.cfg.subject
-            if self.subject:
-                with store._lock, store.conn:
-                    store._set_meta("subject", self.subject)
+        if stored and self.cfg.subject and self.cfg.subject != stored:
+            # the Producer changed the marker in Settings: migrate the store (deliberate, logged)
+            n = store.migrate_subject(stored, self.cfg.subject)
+            logging.getLogger("keepsakedb").info("subject %r -> %r (%d memories rewritten)", stored, self.cfg.subject, n)
+            stored = self.cfg.subject
+        self.subject = stored or self.cfg.subject
+        if self.subject and not stored:
+            with store._lock, store.conn:
+                store._set_meta("subject", self.subject)
 
     # ------------------------------------------------------------- read side
     def turn(self) -> int:

@@ -98,8 +98,10 @@ def test_subject_marker_is_a_store_constant(tmp_path):
     p.observe("我叫承宇")
     system = llm.calls[0][0]
     assert "«製作人»" in system and '"承宇"' in system and ks._meta("subject") == "製作人"
+    ks.add("製作人最喜歡吃麻辣鍋", ["food"])
     p2 = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(subject="使用者"))
-    assert p2.subject == "製作人"  # the store's marker wins
+    assert p2.subject == "使用者" and ks._meta("subject") == "使用者"  # configured marker wins: the store is migrated
+    assert ks.search("麻辣鍋", k=1, mode="bm25")[0].text == "使用者最喜歡吃麻辣鍋"
     ks2 = Keepsake(str(tmp_path / "n.db"), embedder=HashEmbedder(8))
     llm2 = ScriptedLLM([ops({"op": "noop"})])
     Pipeline(ks2, llm2).observe("hi")

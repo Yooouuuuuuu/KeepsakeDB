@@ -110,7 +110,7 @@ class Keepsake:
                  oversample: int = 3, owner: bool = False, backup_dir: Optional[str] = None,
                  snapshot_text_only: bool = False, log_searches: bool = True,
                  log_pipeline: bool = True, log_retention_days: Optional[int] = 90,
-                 slow_ms: float = 50.0, busy_timeout: float = 5.0) -> None:
+                 slow_ms: float = 50.0, busy_timeout: float = 5.0, reindex_on_mismatch: bool = False) -> None:
         """owner=True marks this process as the single writer (drains the command queue,
         publishes a heartbeat). backup_dir enables a daily snapshot on the first write of
         each day plus one before risky operations (reindex / reembed / purge / restore).
@@ -140,8 +140,12 @@ class Keepsake:
         self.conn.executescript(_SCHEMA)
         self._set_meta_default("schema_version", str(SCHEMA_VERSION))
         self._set_meta_default("tokenizer", self.tok.name)
+        self._pending_reindex: Optional[str] = None
         if self._meta("tokenizer") != self.tok.name:
-            raise ValueError(f"store was built with tokenizer {self._meta('tokenizer')!r}; call reindex() to switch")
+            if not reindex_on_mismatch:
+                raise ValueError(f"store was built with tokenizer {self._meta('tokenizer')!r}; call reindex() to switch")
+            # open with the stored tokenizer, rebuild the index for the configured one below
+            self._pending_reindex, self.tok = self.tok.name, get_tokenizer(self._meta("tokenizer"))
         stored_dims = self._meta("dims")
         self.dims = dims or (int(stored_dims) if stored_dims else None) or getattr(embedder, "dims", None)
         self._dense_kind = dense_index
@@ -152,6 +156,9 @@ class Keepsake:
         self._last_history_id = self._max_history_id()
         if log_retention_days:
             self.prune_logs(log_retention_days)
+        if self._pending_reindex:
+            n = self.reindex(self._pending_reindex)
+            log.info("tokenizer changed in config: reindexed %d memories with %s", n, self._pending_reindex)
         log.info("open %s: %d memories, dims=%s, tokenizer=%s, owner=%s", path,
                  self.count(include_archived=True), self.dims, self.tok.name, owner)
 
@@ -904,6 +911,46 @@ class Keepsake:
             self._set_meta("last_embedder", embedder.name)
         log.info("reembedded %d memories with %s", n, embedder.name)
         return n
+
+    def migrate_subject(self, old: str, new: str, embedder=None) -> int:
+        """The subject marker is a per-store constant; changing it rewrites every memory whose text
+        starts with (or contains) the old word, re-embeds those rows, and records the new marker.
+        Deliberate and logged — used when the Producer changes the marker in Settings."""
+        old, new = (old or "").strip(), (new or "").strip()
+        if not new or old == new:
+            return 0
+        emb = embedder or self.embedder
+        rows = self.conn.execute("SELECT id, text, archived FROM memories WHERE text LIKE ?", (f"%{old}%",)).fetchall() if old else []
+        changed: List[Tuple[int, str, int]] = []
+        for mid, text, arch in rows:
+            if text.startswith(old):
+                t2 = new + text[len(old):]
+            else:
+                t2 = text.replace(old, new)
+            if t2 != text:
+                changed.append((mid, t2, arch))
+        with self._lock, self.conn:
+            now = time.time()
+            for mid, t2, _ in changed:
+                toks = index_string(self.tok, t2)
+                self.conn.execute("UPDATE memories SET text=?, tokens=?, updated_at=? WHERE id=?", (t2, toks, now, mid))
+                self.conn.execute("DELETE FROM memories_fts WHERE rowid=?", (mid,))
+                self.conn.execute("INSERT INTO memories_fts(rowid, tokens) VALUES (?, ?)", (mid, toks))
+                self.conn.execute("INSERT INTO history(memory_id, op, reason, at) VALUES (?, 'update', ?, ?)",
+                                  (mid, f"subject {old!r} -> {new!r}", now))
+            self._set_meta("subject", new)
+        if changed and emb is not None:
+            for i in range(0, len(changed), 64):
+                chunk = changed[i:i + 64]
+                vecs = emb.embed([t for _, t, _ in chunk])
+                with self._lock, self.conn:
+                    for (mid, _, arch), v in zip(chunk, vecs):
+                        self.conn.execute("UPDATE memories SET embedding=? WHERE id=?", (v.astype(np.float32).tobytes(), mid))
+                        if self.dense is not None:
+                            self.dense.add(mid, v, ARCHIVED if arch else ACTIVE)
+        self._last_history_id = self._max_history_id()
+        log.info("subject %r -> %r: %d memories rewritten", old, new, len(changed))
+        return len(changed)
 
     def reindex(self, tokenizer: "str | Tokenizer") -> int:
         """Switch tokenizer: rebuild the FTS5 index."""
