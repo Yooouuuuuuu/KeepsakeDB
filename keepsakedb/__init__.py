@@ -7,5 +7,5 @@ L3 ``keepsakedb.integrate`` how an agent wires L1+L2 into its turn loop (any fra
 from .oplog import configure_logging
 from .store import Keepsake, Memory
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 __all__ = ["Keepsake", "Memory", "configure_logging", "__version__"]

@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS commands(
     requested_at REAL NOT NULL, requested_by TEXT, done_at REAL, result TEXT);
 """
 
-_COLS = "id, text, tags, meta, archived, archive_reason, created_at, updated_at"
+_COLS = "id, text, tags, meta, archived, archive_reason, created_at, updated_at, layer"
+LAYERS = ("long", "short")  # long = tagged facts; short = dated notes (ring-capped), both searched alike
 _LOG_COLS = ("id", "at", "query", "mode", "memory_id", "rank", "fused", "dense", "bm25", "label", "injected")
 _PLOG_COLS = ("id", "at", "user_text", "candidates", "raw", "applied", "skipped", "error", "model", "ms")
 _CMD_COLS = ("id", "op", "payload", "requested_at", "requested_by", "done_at", "result")
@@ -93,6 +94,7 @@ class Memory:
     archive_reason: Optional[str] = None
     created_at: float = 0.0
     updated_at: float = 0.0
+    layer: str = "long"           # long | short (see LAYERS)
     # search-time fields
     score: float = 0.0             # fused score
     dense: Optional[float] = None  # cosine, if the dense leg saw it
@@ -138,6 +140,13 @@ class Keepsake:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
+        if "layer" not in {r[1] for r in self.conn.execute("PRAGMA table_info(memories)")}:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN layer TEXT NOT NULL DEFAULT 'long'")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_layer ON memories(layer)")
+        self._busy_timeout = busy_timeout
+        self._readers: List[sqlite3.Connection] = []  # extra read-only connections for concurrent layer searches
+        self._layer_counts: Dict[str, int] = {}
+        self._refresh_layer_counts()
         self._set_meta_default("schema_version", str(SCHEMA_VERSION))
         self._set_meta_default("tokenizer", self.tok.name)
         self._pending_reindex: Optional[str] = None
@@ -161,6 +170,27 @@ class Keepsake:
             log.info("tokenizer changed in config: reindexed %d memories with %s", n, self._pending_reindex)
         log.info("open %s: %d memories, dims=%s, tokenizer=%s, owner=%s", path,
                  self.count(include_archived=True), self.dims, self.tok.name, owner)
+
+    # -------------------------------------------------------------- layers
+    def _refresh_layer_counts(self) -> None:
+        """Kept in memory so search_layers can start the bigger layer first without a query."""
+        self._layer_counts = {r[0]: int(r[1]) for r in
+                              self.conn.execute("SELECT layer, count(*) FROM memories WHERE archived=0 GROUP BY layer")}
+
+    def _reader_conn(self, i: int) -> sqlite3.Connection:
+        """The i-th extra read-only connection (WAL readers never block the writer or each other)."""
+        while len(self._readers) <= i:
+            c = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False, timeout=self._busy_timeout)
+            self._readers.append(c)
+        return self._readers[i]
+
+    def prune_layer(self, layer: str, keep: int, reason: str = "") -> int:
+        """Ring buffer: hard-delete the oldest rows of a layer beyond ``keep`` (the short layer's cap)."""
+        if keep < 0:
+            return 0
+        ids = [r[0] for r in self.conn.execute(
+            "SELECT id FROM memories WHERE layer=? ORDER BY id DESC LIMIT -1 OFFSET ?", (layer, keep))]
+        return self.delete(ids, reason=reason or f"ring {layer} > {keep}") if ids else 0
 
     # ---------------------------------------------------------------- meta
     def _meta(self, key: str) -> Optional[str]:
@@ -204,12 +234,14 @@ class Keepsake:
 
     # ----------------------------------------------------------------- write
     def add(self, text: str, tags: Iterable[str] = (), meta: Optional[Dict[str, Any]] = None,
-            embedding: Optional[np.ndarray] = None, ts: Optional[float] = None) -> int:
+            embedding: Optional[np.ndarray] = None, ts: Optional[float] = None, layer: str = "long") -> int:
         emb = None if embedding is None else np.asarray([embedding], dtype=np.float32)
-        return self.add_many([(text, list(tags), meta or {})], embeddings=emb, ts=ts)[0]
+        return self.add_many([(text, list(tags), meta or {})], embeddings=emb, ts=ts, layer=layer)[0]
 
     def add_many(self, items: Sequence[Tuple[str, List[str], Dict[str, Any]]],
-                 embeddings: Optional[np.ndarray] = None, ts: Optional[float] = None) -> List[int]:
+                 embeddings: Optional[np.ndarray] = None, ts: Optional[float] = None, layer: str = "long") -> List[int]:
+        if layer not in LAYERS:
+            raise ValueError(f"layer must be one of {LAYERS}")
         if not items:
             return []
         self._auto_snapshot()
@@ -229,10 +261,10 @@ class Keepsake:
                     toks = index_string(self.tok, text)
                     blob = embeddings[i].astype(np.float32).tobytes() if embeddings is not None else None
                     cur = self.conn.execute(
-                        "INSERT INTO memories(text, tokens, tags, meta, created_at, updated_at, embedding, embedder)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO memories(text, tokens, tags, meta, created_at, updated_at, embedding, embedder, layer)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (text, toks, json.dumps(tags, ensure_ascii=False), json.dumps(meta, ensure_ascii=False),
-                         now, now, blob, ename))
+                         now, now, blob, ename, layer))
                     mid = int(cur.lastrowid)
                     self.conn.execute("INSERT INTO memories_fts(rowid, tokens) VALUES (?, ?)", (mid, toks))
                     self.conn.executemany("INSERT INTO memory_tags(memory_id, tag) VALUES (?, ?)",
@@ -247,6 +279,7 @@ class Keepsake:
                 self.conn.execute("ROLLBACK")
                 raise
             self._last_history_id = self._max_history_id()
+            self._layer_counts[layer] = self._layer_counts.get(layer, 0) + len(ids)
         return ids
 
     def update(self, mid: int, text: Optional[str] = None, tags: Optional[Iterable[str]] = None,
@@ -299,7 +332,7 @@ class Keepsake:
         if old is None:
             raise KeyError(old_id)
         new_id = self.add(text, tags if tags is not None else old.tags, dict(old.meta, supersedes=old_id),
-                          embedding=embedding)
+                          embedding=embedding, layer=old.layer)
         now = time.time()
         with self._lock, self.conn:
             # state 2 = superseded: hidden like archived, but never surfaced as meta-info or by consent
@@ -376,23 +409,26 @@ class Keepsake:
                     self.dense.remove(mid)
                 n += 1
         self._last_history_id = self._max_history_id()
+        if n:
+            self._refresh_layer_counts()
         return n
 
     # ------------------------------------------------------------------ read
     @staticmethod
     def _row(r: Tuple) -> Memory:
         return Memory(id=r[0], text=r[1], tags=json.loads(r[2]), meta=json.loads(r[3]), archived=bool(r[4]),
-                      superseded=(r[4] == 2), archive_reason=r[5], created_at=r[6], updated_at=r[7])
+                      superseded=(r[4] == 2), archive_reason=r[5], created_at=r[6], updated_at=r[7],
+                      layer=r[8] if len(r) > 8 and r[8] else "long")
 
     def get(self, mid: int) -> Optional[Memory]:
         r = self.conn.execute(f"SELECT {_COLS} FROM memories WHERE id=?", (mid,)).fetchone()
         return self._row(r) if r else None
 
-    def get_many(self, ids: Sequence[int]) -> Dict[int, Memory]:
+    def get_many(self, ids: Sequence[int], conn: Optional[sqlite3.Connection] = None) -> Dict[int, Memory]:
         if not ids:
             return {}
         q = f"SELECT {_COLS} FROM memories WHERE id IN ({','.join('?' * len(ids))})"
-        return {r[0]: self._row(r) for r in self.conn.execute(q, list(ids))}
+        return {r[0]: self._row(r) for r in (conn or self.conn).execute(q, list(ids))}
 
     def all(self, include_archived: bool = True, limit: Optional[int] = None) -> List[Memory]:
         cond = "" if include_archived else " WHERE archived=0"
@@ -418,9 +454,10 @@ class Keepsake:
             "SELECT id, memory_id, op, old_text, new_text, reason, at FROM history WHERE memory_id=? ORDER BY id",
             (mid,))]
 
-    def count(self, include_archived: bool = False) -> int:
-        cond = "" if include_archived else " WHERE archived=0"
-        return int(self.conn.execute(f"SELECT count(*) FROM memories{cond}").fetchone()[0])
+    def count(self, include_archived: bool = False, layer: Optional[str] = None) -> int:
+        conds = ([] if include_archived else ["archived=0"]) + (["layer=?"] if layer else [])
+        q = "SELECT count(*) FROM memories" + (" WHERE " + " AND ".join(conds) if conds else "")
+        return int(self.conn.execute(q, [layer] if layer else []).fetchone()[0])
 
     def stats(self) -> Dict[str, Any]:
         c = self.conn
@@ -434,13 +471,15 @@ class Keepsake:
             "search_log_rows": one("SELECT count(*) FROM search_log"),
             "pipeline_log_rows": one("SELECT count(*) FROM pipeline_log"),
             "pending_commands": one("SELECT count(*) FROM commands WHERE done_at IS NULL"),
+            "layers": dict(self._layer_counts),
             "owner": owner, "owner_alive": self.owner_alive(),
             "last_snapshot": self._meta("last_snapshot"), "file_bytes": os.path.getsize(self.path) if os.path.exists(self.path) else 0,
         }
 
     # ---------------------------------------------------------------- search
     def _bm25_leg(self, query: str, k: int, include_archived: bool, tag: Optional[str],
-                  phrase: bool = False) -> List[Tuple[int, float]]:
+                  phrase: bool = False, layer: Optional[str] = None,
+                  conn: Optional[sqlite3.Connection] = None) -> List[Tuple[int, float]]:
         match = fts_query(self.tok, query, phrase=phrase)
         if not match or k <= 0:
             return []
@@ -449,18 +488,22 @@ class Keepsake:
         join = " JOIN memories m ON m.id = memories_fts.rowid"
         if not include_archived:
             conds.append("m.archived = 0")
+        if layer is not None:
+            conds.append("m.layer = ?")
+            params.append(layer)
         if tag is not None:
             join += " JOIN memory_tags t ON t.memory_id = m.id"
             conds.append("t.tag = ?")
             params.append(tag)
         params.append(k)
-        rows = self.conn.execute(
+        rows = (conn or self.conn).execute(
             f"SELECT memories_fts.rowid, bm25(memories_fts) AS s FROM memories_fts{join} "
             f"WHERE {' AND '.join(conds)} ORDER BY s LIMIT ?", params).fetchall()
         return [(int(i), -float(s)) for i, s in rows]  # FTS5 bm25() is negative, lower = better
 
     def _dense_leg(self, query: str, k: int, include_archived: bool, tag: Optional[str],
-                   query_embedding: Optional[np.ndarray]) -> List[Tuple[int, float]]:
+                   query_embedding: Optional[np.ndarray], layer: Optional[str] = None,
+                   conn: Optional[sqlite3.Connection] = None) -> List[Tuple[int, float]]:
         if self.dense is None or k <= 0:
             return []
         q = query_embedding
@@ -469,16 +512,21 @@ class Keepsake:
             if e is None:
                 return []
             q = e[0]
+        c = conn or self.conn
         allowed = None
         if tag is not None:
-            allowed = {r[0] for r in self.conn.execute("SELECT memory_id FROM memory_tags WHERE tag=?", (tag,))}
+            allowed = {r[0] for r in c.execute("SELECT memory_id FROM memory_tags WHERE tag=?", (tag,))}
+        if layer is not None:
+            ids = {r[0] for r in c.execute("SELECT id FROM memories WHERE layer=?", (layer,))}
+            allowed = ids if allowed is None else allowed & ids
         return self.dense.search(np.asarray(q, dtype=np.float32), k, include_archived, allowed)
 
     def _legs(self, query: str, mode: str, k: int, legs_k: Optional[int], inc: bool, tag: Optional[str],
-              query_embedding: Optional[np.ndarray], phrase: bool) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+              query_embedding: Optional[np.ndarray], phrase: bool, layer: Optional[str] = None,
+              conn: Optional[sqlite3.Connection] = None) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
         lk = legs_k or max(k * self.oversample, 10)
-        dense_leg = self._dense_leg(query, lk, inc, tag, query_embedding) if mode in ("hybrid", "dense") else []
-        bm25_leg = self._bm25_leg(query, lk, inc, tag, phrase) if mode in ("hybrid", "bm25") else []
+        dense_leg = self._dense_leg(query, lk, inc, tag, query_embedding, layer, conn) if mode in ("hybrid", "dense") else []
+        bm25_leg = self._bm25_leg(query, lk, inc, tag, phrase, layer, conn) if mode in ("hybrid", "bm25") else []
         return dense_leg, bm25_leg
 
     def _fuse(self, mode: str, ranker: str, weights, norm: str, dense_leg, bm25_leg) -> Dict[int, float]:
@@ -500,21 +548,99 @@ class Keepsake:
                weights: Tuple[float, float] = (0.5, 0.5), norm: str = "minmax",
                archived: str = "exclude", tag: Optional[str] = None,
                query_embedding: Optional[np.ndarray] = None, legs_k: Optional[int] = None,
-               phrase: bool = False, exclude_tags: Optional[Iterable[str]] = None, _log: bool = True) -> List[Memory]:
+               phrase: bool = False, exclude_tags: Optional[Iterable[str]] = None,
+               layer: Optional[str] = None, _log: bool = True) -> List[Memory]:
         """mode: hybrid | dense | bm25.  ranker: rrf (default, rank-based, no weights) |
         weighted (weights = dense/BM25 shares; norm minmax | arctan | none).
         archived: exclude | include | meta (meta = archived hits come back with text withheld
-        and label 'archived').  phrase=True makes the BM25 leg an exact-substring lookup."""
+        and label 'archived').  phrase=True makes the BM25 leg an exact-substring lookup.
+        layer: long | short | None (both)."""
         if archived not in ("exclude", "include", "meta"):
             raise ValueError("archived must be exclude | include | meta")
         t0 = time.perf_counter()
         with self._lock:  # one SQLite connection: serialize against writes from other threads
             self._before_read()
-            inc = archived != "exclude"
-            dense_leg, bm25_leg = self._legs(query, mode, k, legs_k, inc, tag, query_embedding, phrase)
-            excl = set(exclude_tags or ())
-            ranked = fusion.top(self._fuse(mode, ranker, weights, norm, dense_leg, bm25_leg), k if not excl else k * 3)
-            rows = self.get_many([mid for mid, _ in ranked])
+            out = self._search_core(self.conn, query, k, mode, ranker, weights, norm, archived, tag,
+                                    query_embedding, legs_k, phrase, exclude_tags, layer)
+        if self.log_searches and _log:
+            self._log_search(query, mode if layer is None else f"{mode}:{layer}", out, None)
+        ms = (time.perf_counter() - t0) * 1000
+        if ms > self.slow_ms:
+            log.warning("slow search %.1f ms (mode=%s, k=%d, n=%d): %.60s", ms, mode, k, self.count(), query)
+        return out
+
+    def search_layers(self, query: str, layers: "Sequence[str] | Dict[str, int]" = LAYERS, k: int = 5,
+                      mode: str = "hybrid", archived: str = "exclude",
+                      query_embedding: Optional[np.ndarray] = None, _log: bool = True,
+                      **kw: Any) -> Dict[str, List[Memory]]:
+        """One embedding, every layer searched at once. ``layers`` is a list (k each) or a
+        {layer: k} dict. The bigger layer (by the in-memory count) starts first on its own
+        read-only connection; the smallest runs on this thread right after, nobody waits for
+        anybody — only the join at the end. Results come back per layer."""
+        ks = dict(layers) if isinstance(layers, dict) else {l: k for l in layers}
+        for l in ks:
+            if l not in LAYERS:
+                raise ValueError(f"layer must be one of {LAYERS}")
+        t0 = time.perf_counter()
+        q = query_embedding
+        if q is None and mode in ("hybrid", "dense"):
+            e = self._embed([query])
+            q = e[0] if e is not None else None
+        with self._lock:
+            self._before_read()
+        order = sorted(ks, key=lambda l: -self._layer_counts.get(l, 0))  # bigger first
+        results: Dict[str, List[Memory]] = {}
+        errors: Dict[str, BaseException] = {}
+
+        def run(layer: str, conn: sqlite3.Connection, locked: bool) -> None:
+            try:
+                if locked:
+                    with self._lock:
+                        results[layer] = self._search_core(conn, query, ks[layer], mode, kw.get("ranker", "rrf"),
+                                                           kw.get("weights", (0.5, 0.5)), kw.get("norm", "minmax"),
+                                                           archived, kw.get("tag"), q, kw.get("legs_k"),
+                                                           kw.get("phrase", False), kw.get("exclude_tags"), layer)
+                else:
+                    results[layer] = self._search_core(conn, query, ks[layer], mode, kw.get("ranker", "rrf"),
+                                                       kw.get("weights", (0.5, 0.5)), kw.get("norm", "minmax"),
+                                                       archived, kw.get("tag"), q, kw.get("legs_k"),
+                                                       kw.get("phrase", False), kw.get("exclude_tags"), layer)
+            except BaseException as exc:  # surfaced after the join
+                errors[layer] = exc
+
+        threads: List[threading.Thread] = []
+        in_memory = self.path == ":memory:"
+        for i, layer in enumerate(order[:-1]):
+            if in_memory:
+                run(layer, self.conn, True)
+                continue
+            th = threading.Thread(target=run, args=(layer, self._reader_conn(i), False), daemon=True)
+            th.start()
+            threads.append(th)
+        if order:
+            run(order[-1], self.conn, True)  # the smallest, on this thread, main connection
+        for th in threads:
+            th.join()
+        if errors:
+            raise next(iter(errors.values()))
+        if self.log_searches and _log:
+            for layer, hits in results.items():
+                self._log_search(query, f"{mode}:{layer}", hits, None)
+        ms = (time.perf_counter() - t0) * 1000
+        if ms > self.slow_ms:
+            log.warning("slow layered search %.1f ms (layers=%s): %.60s", ms, order, query)
+        return {l: results.get(l, []) for l in ks}
+
+    def _search_core(self, conn: sqlite3.Connection, query: str, k: int, mode: str, ranker: str, weights,
+                     norm: str, archived: str, tag: Optional[str], query_embedding: Optional[np.ndarray],
+                     legs_k: Optional[int], phrase: bool, exclude_tags: Optional[Iterable[str]],
+                     layer: Optional[str]) -> List[Memory]:
+        """Legs, fusion and row fetch on the given connection; no lock, no log (callers handle both)."""
+        inc = archived != "exclude"
+        dense_leg, bm25_leg = self._legs(query, mode, k, legs_k, inc, tag, query_embedding, phrase, layer, conn)
+        excl = set(exclude_tags or ())
+        ranked = fusion.top(self._fuse(mode, ranker, weights, norm, dense_leg, bm25_leg), k if not excl else k * 3)
+        rows = self.get_many([mid for mid, _ in ranked], conn)
         d_scores, b_scores = dict(dense_leg), dict(bm25_leg)
         out: List[Memory] = []
         for mid, s in ranked:
@@ -535,11 +661,6 @@ class Keepsake:
             elif m.dense is not None and m.dense >= self.high:
                 m.label = "high"
             out.append(m)
-        if self.log_searches and _log:
-            self._log_search(query, mode, out, None)
-        ms = (time.perf_counter() - t0) * 1000
-        if ms > self.slow_ms:
-            log.warning("slow search %.1f ms (mode=%s, k=%d, n=%d): %.60s", ms, mode, k, self.count(), query)
         return out
 
     def explain(self, query: str, k: int = 5, mode: str = "hybrid", ranker: str = "rrf",
@@ -762,6 +883,7 @@ class Keepsake:
         if v == self._data_version:
             return
         self._data_version = v
+        self._refresh_layer_counts()
         rows = self.conn.execute("SELECT DISTINCT memory_id FROM history WHERE id > ?", (self._last_history_id,)).fetchall()
         self._last_history_id = self._max_history_id()
         if not rows or self.dense is None or self._dense_kind != "numpy":
@@ -977,6 +1099,12 @@ class Keepsake:
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def close(self) -> None:
+        for c in self._readers:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self._readers = []
         self._stop.set()
         if self._owner_thread:
             self._owner_thread.join(timeout=2)

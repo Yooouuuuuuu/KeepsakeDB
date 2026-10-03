@@ -38,7 +38,7 @@ Rules
 8. Consent: when a candidate is marked archived and the user now agrees to talk about that
    topic ("yes, let's talk about it", "that's fine now"), emit consent for its tag so the
    memories can be used for a while. Unarchive only when they say the topic is fine for good.
-
+{note_rule}
 Output format (JSON only, no prose):
 {{"ops": [
   {{"op": "add", "text": "...", "tags": ["..."]}},
@@ -48,7 +48,14 @@ Output format (JSON only, no prose):
   {{"op": "unarchive", "tag": "sports"}},
   {{"op": "consent", "tag": "sports"}},
   {{"op": "noop"}}
-]}}"""
+]{note_field}}}"""
+
+NOTE_RULE = """9. Note: besides ops, return "note" — ONE short line in {language} recording what happened
+   in this turn when it could matter to recall later: what the user asked for or did, a plan,
+   a decision, a mood with its cause. The episode, not the conclusion — facts belong in ops,
+   and a note never repeats an add text. null for greetings, small talk, pure questions to the
+   assistant and trivia (the date, the weather).
+"""
 
 USER = """User message:
 {user_text}

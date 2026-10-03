@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — 2026-10-03
+
+- **Two layers in one file.** `memories.layer` = `long` (tagged facts, trust labels, supersede /
+  archive — unchanged) or `short` (dated notes, no tags, a ring capped by `prune_layer`). One owner,
+  one backup rotation, one search machinery; `add(..., layer=)`, `search(..., layer=)`,
+  `count(layer=)`, `stats()["layers"]`, `prune_layer(layer, keep)`. Existing stores migrate on open.
+- **`search_layers()`** — one embedding, every layer searched at once: the bigger layer (in-memory
+  count) starts first on its own read-only connection, the smallest runs on the calling thread right
+  after; only the final join waits. Results per layer.
+- **Pipeline:** the same observe call may return `"note"` (one dated line for the short layer:
+  `short_layer`, `short_k`, `short_cap`, `surface`); candidates come from the long layer only.
+  `context_for` injects `Facts (long-term)` and `Notes (recent, dated)` from one layered search.
+
 ## 0.1.3 — 2026-10-02
 
 - **Removed the recent-exchange layer** (added in 0.1.2). Recording every turn in the store mixed two

@@ -38,10 +38,15 @@ class PipelineConfig:
     user_name: Optional[str] = None  # the user's current name (prompt-layer only; never the stored subject)
     retries: int = 1              # extra attempts when the LLM reply is empty / not JSON (transient backend glitches)
     retry_delay_s: float = 2.0
+    short_layer: bool = True      # the same observe call may return a dated note for the short layer
+    short_k: int = 5              # notes injected per turn (long facts use context_k)
+    short_cap: int = 1000         # ring size of the short layer (oldest dropped)
+    surface: str = ""             # stamped on notes (meta), e.g. 事務所 / Telegram — never part of the text
 
 
 @dataclass
 class ObserveResult:
+    note: Optional[str] = None
     applied: List[Dict[str, Any]] = field(default_factory=list)
     skipped: List[Dict[str, Any]] = field(default_factory=list)
     raw: str = ""
@@ -87,9 +92,15 @@ class Pipeline:
         with self._lock:
             self._consent.clear()
 
-    def context_for(self, user_text: str, k: Optional[int] = None, title: str = "Long-term memory") -> str:
+    def context_for(self, user_text: str, k: Optional[int] = None, title: str = "Memory") -> str:
+        """The injection block: long-term facts (trust labels, archived meta-info) and, when the
+        short layer is on, dated notes — both found by one embedding + one concurrent search."""
         k = k or self.cfg.context_k
-        hits = self.store.search(user_text, k=k, archived="include", _log=False)
+        layers: Dict[str, int] = {"long": k}
+        if self.cfg.short_layer and self.cfg.short_k > 0:
+            layers["short"] = self.cfg.short_k
+        found = self.store.search_layers(user_text, layers=layers, archived="include", _log=False)
+        hits = found.get("long", [])
         open_tags = set(self.consented_tags())
         lines = []
         injected = set()
@@ -107,9 +118,23 @@ class Pipeline:
             tag_s = f" (tags: {', '.join(m.tags)})" if m.tags else ""
             lines.append(f"- {'[high] ' if m.label == 'high' else ''}{m.text}{tag_s}")
             injected.add(m.id)
+        notes = []
+        for m in found.get("short", []):
+            if m.archived or (m.dense is not None and m.dense < self.store.drop and m.bm25 is None):
+                continue
+            when = time.strftime("%m/%d", time.localtime(m.created_at))
+            where = m.meta.get("surface")
+            notes.append(f"- [{when}{' ' + where if where else ''}] {m.text}")
+            injected.add(m.id)
         if self.store.log_searches:  # the calibration data: every candidate, and which ones were injected
             self.store._log_search(user_text, "context", hits, injected)
-        return f"{title}:\n" + "\n".join(lines) if lines else ""
+            if found.get("short"):
+                self.store._log_search(user_text, "context:short", found["short"], injected)
+        if not lines and not notes:
+            return ""
+        if lines and notes:
+            return f"{title}:\nFacts (long-term):\n" + "\n".join(lines) + "\nNotes (recent, dated):\n" + "\n".join(notes)
+        return f"{title}:\n" + "\n".join(lines or notes)
 
     # ------------------------------------------------------------ write side
     def observe(self, user_text: str, assistant_text: Optional[str] = None) -> ObserveResult:
@@ -120,20 +145,25 @@ class Pipeline:
             return self._observe(user_text, assistant_text, t0)
 
     def _observe(self, user_text: str, assistant_text: Optional[str], t0: float) -> ObserveResult:
-        candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", _log=False)
+        candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", layer="long", _log=False)
         name_hint = (prompts.NAME_HINT.format(user_name=self.cfg.user_name, subject=self.subject or "the user")
                      if self.cfg.user_name else "")
         subject_rule = prompts.SUBJECT_RULE.format(subject=self.subject, name_hint=name_hint) if self.subject else ""
-        system = prompts.SYSTEM.format(language=self.cfg.language, subject_rule=subject_rule)
+        system = prompts.SYSTEM.format(language=self.cfg.language, subject_rule=subject_rule,
+                                       note_rule=prompts.NOTE_RULE.format(language=self.cfg.language) if self.cfg.short_layer else "",
+                                       note_field=', "note": "one line" | null' if self.cfg.short_layer else "")
         user = prompts.build_user(user_text, assistant_text if self.cfg.user_facts_only else None,
                                   candidates, self.store.tags(include_archived=True))
         res = ObserveResult()
         cand_ids = {m.id for m in candidates}
         ops: list = []
+        note: Any = None
         for attempt in range(1 + max(0, self.cfg.retries)):
             try:
                 res.raw = self.llm.complete(system, user)
-                ops = extract_json(res.raw).get("ops", [])
+                data = extract_json(res.raw)
+                ops = data.get("ops", [])
+                note = data.get("note")
                 res.error = None
                 break
             except Exception as e:  # LLM or JSON failure never breaks the turn; retry once for glitches
@@ -148,6 +178,18 @@ class Pipeline:
                 self._apply(op, cand_ids, res)
             except Exception as e:
                 res.skipped.append({**op, "why": f"{type(e).__name__}: {e}"})
+        if self.cfg.short_layer and isinstance(note, str) and note.strip():
+            try:  # the episode goes to the short layer: no tags, dated by created_at, surface in meta
+                meta = {"kind": "note"}
+                if self.cfg.surface:
+                    meta["surface"] = self.cfg.surface
+                nid = self.store.add(note.strip(), [], meta, layer="short")
+                res.note = note.strip()
+                res.applied.append({"op": "note", "id": nid, "text": res.note})
+                if self.cfg.short_cap > 0:
+                    self.store.prune_layer("short", self.cfg.short_cap)
+            except Exception as e:
+                res.skipped.append({"op": "note", "why": f"{type(e).__name__}: {e}"})
         ms = (time.perf_counter() - t0) * 1000
         # pipeline log: candidates shown, the raw reply, what was applied/skipped — not the prompt
         self.store.log_pipeline_run(user_text, sorted(cand_ids), res.raw, res.applied, res.skipped, res.error,
