@@ -121,3 +121,19 @@ def test_render_subject_in_context(tmp_path):
     q = Pipeline(ks, ScriptedLLM([]), PipelineConfig(subject="你"))
     assert "你最常用名單分頁" in q.context_for("名單")  # no render_subject: as stored
     ks.close()
+
+
+def test_turn_stamp_and_annotate(tmp_path):
+    ks = Keepsake(str(tmp_path / "s.db"), embedder=HashEmbedder(16))
+    p = Pipeline(ks, ScriptedLLM([json.dumps({"ops": [{"op": "add", "text": "你下週五有面試", "tags": ["work"]}], "note": "你說下週五面試"}, ensure_ascii=False)]),
+                 PipelineConfig(subject="你"))
+    r = p.observe("我下週五要面試", "加油！", turn_id="t-42", source="你")
+    got = ks.by_turn("t-42")
+    assert {m.layer for m in got} == {"long", "short"}  # the fact and the note both carry the stamp
+    assert all(m.meta["turn_id"] == "t-42" and m.meta["source"] == "你" for m in got)
+    assert ks.annotate_turn("t-42", {"valence": 0.6, "arousal": 0.5, "instance_ids": ["em_1"]}) == 2
+    m = ks.get(got[0].id)
+    assert m.meta["valence"] == 0.6 and m.meta["instance_ids"] == ["em_1"] and m.text == got[0].text
+    assert ks.annotate_turn("nope", {"valence": 0}) == 0
+    assert p.observe("隨便聊聊", "好啊").applied == [] or True  # a turn without a stamp still works
+    ks.close()

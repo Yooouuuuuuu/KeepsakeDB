@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-10-07
+
+- `Pipeline.observe(..., turn_id=, source=)` stamps `meta.turn_id` / `meta.source` on every memory the turn
+  writes (long facts and short notes).
+- `Keepsake.annotate(ids, fields)`, `by_turn(turn_id)`, `annotate_turn(turn_id, fields)`: merge fields such
+  as valence, arousal and instance ids into meta after the fact, without re-embedding — an emotion engine
+  running in parallel with the observe can align with memory later.
+
 ## 0.2.1 — 2026-10-07
 
 - `PipelineConfig.render_subject`: memories keep their stored subject word (556 now stores 你), and the

@@ -140,14 +140,20 @@ class Pipeline:
         return f"{title}:\n" + "\n".join(lines or notes)
 
     # ------------------------------------------------------------ write side
-    def observe(self, user_text: str, assistant_text: Optional[str] = None) -> ObserveResult:
+    def observe(self, user_text: str, assistant_text: Optional[str] = None, *,
+                turn_id: Optional[str] = None, source: Optional[str] = None) -> ObserveResult:
+        """turn_id / source (who told her) are stamped into the meta of every memory this turn
+        writes, so a later process (e.g. an emotion engine) can annotate them by turn."""
         if self.cfg.prefilter is not None and not self.cfg.prefilter(user_text):
             return ObserveResult()
         t0 = time.perf_counter()
+        stamp = {k: v for k, v in (("turn_id", turn_id), ("source", source)) if v}
         with self._lock:  # one observe at a time (the LLM call is outside the store lock)
-            return self._observe(user_text, assistant_text, t0)
+            return self._observe(user_text, assistant_text, t0, stamp)
 
-    def _observe(self, user_text: str, assistant_text: Optional[str], t0: float) -> ObserveResult:
+    def _observe(self, user_text: str, assistant_text: Optional[str], t0: float,
+                 stamp: Optional[Dict[str, Any]] = None) -> ObserveResult:
+        stamp = stamp or {}
         candidates = self.store.search(user_text, k=self.cfg.max_candidates, archived="include", layer="long", _log=False)
         name_hint = (prompts.NAME_HINT.format(user_name=self.cfg.user_name, subject=self.subject or "the user")
                      if self.cfg.user_name else "")
@@ -178,12 +184,12 @@ class Pipeline:
             if not isinstance(op, dict):
                 continue
             try:
-                self._apply(op, cand_ids, res)
+                self._apply(op, cand_ids, res, stamp)
             except Exception as e:
                 res.skipped.append({**op, "why": f"{type(e).__name__}: {e}"})
         if self.cfg.short_layer and isinstance(note, str) and note.strip():
             try:  # the episode goes to the short layer: no tags, dated by created_at, surface in meta
-                meta = {"kind": "note"}
+                meta = {"kind": "note", **stamp}
                 if self.cfg.surface:
                     meta["surface"] = self.cfg.surface
                 nid = self.store.add(note.strip(), [], meta, layer="short")
@@ -199,7 +205,8 @@ class Pipeline:
                                     getattr(self.llm, "name", None), ms)
         return res
 
-    def _apply(self, op: Dict[str, Any], cand_ids: set, res: ObserveResult) -> None:
+    def _apply(self, op: Dict[str, Any], cand_ids: set, res: ObserveResult,
+               stamp: Optional[Dict[str, Any]] = None) -> None:
         kind = op.get("op")
         tags = [s for s in (_slug(t) for t in op.get("tags", []) or []) if s]
         text = (op.get("text") or "").strip()
@@ -210,7 +217,7 @@ class Pipeline:
         if kind == "add":
             if not text:
                 raise ValueError("empty text")
-            new_id = self.store.add(text, tags)
+            new_id = self.store.add(text, tags, dict(stamp) if stamp else None)
             res.applied.append({"op": "add", "id": new_id, "text": text, "tags": tags})
         elif kind in ("update", "supersede"):
             if mid not in cand_ids:

@@ -420,6 +420,41 @@ class Keepsake:
                       superseded=(r[4] == 2), archive_reason=r[5], created_at=r[6], updated_at=r[7],
                       layer=r[8] if len(r) > 8 and r[8] else "long")
 
+    def annotate(self, ids: Iterable[int], fields: Dict[str, Any]) -> int:
+        """Merge fields into the meta of the given memories (after-the-fact alignment: valence,
+        arousal, instance_ids, ...). Text, tags, embeddings and updated_at are untouched, so this
+        never re-embeds and never reorders recall. Returns how many rows were changed."""
+        ids = [int(i) for i in ids]
+        if not ids or not fields:
+            return 0
+        n = 0
+        with self._lock:
+            self.conn.execute("BEGIN")
+            try:
+                for mid in ids:
+                    r = self.conn.execute("SELECT meta FROM memories WHERE id=?", (mid,)).fetchone()
+                    if r is None:
+                        continue
+                    meta = json.loads(r[0] or "{}")
+                    meta.update(fields)
+                    self.conn.execute("UPDATE memories SET meta=? WHERE id=?",
+                                      (json.dumps(meta, ensure_ascii=False), mid))
+                    n += 1
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+        return n
+
+    def by_turn(self, turn_id: str) -> List[Memory]:
+        """Memories written by the observe of one turn (meta.turn_id, stamped by Pipeline.observe)."""
+        rows = self.conn.execute(f"SELECT {_COLS} FROM memories WHERE json_extract(meta, '$.turn_id') = ?"
+                                 " ORDER BY id", (str(turn_id),)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def annotate_turn(self, turn_id: str, fields: Dict[str, Any]) -> int:
+        return self.annotate([m.id for m in self.by_turn(turn_id)], fields)
+
     def get(self, mid: int) -> Optional[Memory]:
         r = self.conn.execute(f"SELECT {_COLS} FROM memories WHERE id=?", (mid,)).fetchone()
         return self._row(r) if r else None
