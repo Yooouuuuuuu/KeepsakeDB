@@ -34,7 +34,8 @@ class PipelineConfig:
     context_k: int = 5
     prefilter: Optional[Callable[[str], bool]] = None  # return False to skip the LLM (regex, length...)
     user_facts_only: bool = True
-    subject: Optional[str] = None  # fixed subject word for memories about the user (e.g. 製作人); recorded in the store
+    subject: Optional[str] = None  # fixed subject word for memories about the user (e.g. 你); recorded in the store
+    render_subject: Optional[str] = None  # how the subject reads when injected (their name / address term); None = as stored
     user_name: Optional[str] = None  # the user's current name (prompt-layer only; never the stored subject)
     retries: int = 1              # extra attempts when the LLM reply is empty / not JSON (transient backend glitches)
     retry_delay_s: float = 2.0
@@ -96,6 +97,8 @@ class Pipeline:
         """The injection block: long-term facts (trust labels, archived meta-info) and, when the
         short layer is on, dated notes — both found by one embedding + one concurrent search."""
         k = k or self.cfg.context_k
+        render = self.cfg.render_subject
+        show = (lambda t: t.replace(self.subject, render)) if (self.subject and render and render != self.subject) else (lambda t: t)
         layers: Dict[str, int] = {"long": k}
         if self.cfg.short_layer and self.cfg.short_k > 0:
             layers["short"] = self.cfg.short_k
@@ -116,7 +119,7 @@ class Pipeline:
             if m.dense is not None and m.dense < self.store.drop and m.bm25 is None:
                 continue
             tag_s = f" (tags: {', '.join(m.tags)})" if m.tags else ""
-            lines.append(f"- {'[high] ' if m.label == 'high' else ''}{m.text}{tag_s}")
+            lines.append(f"- {'[high] ' if m.label == 'high' else ''}{show(m.text)}{tag_s}")
             injected.add(m.id)
         notes = []
         for m in found.get("short", []):
@@ -124,7 +127,7 @@ class Pipeline:
                 continue
             when = time.strftime("%m/%d", time.localtime(m.created_at))
             where = m.meta.get("surface")
-            notes.append(f"- [{when}{' ' + where if where else ''}] {m.text}")
+            notes.append(f"- [{when}{' ' + where if where else ''}] {show(m.text)}")
             injected.add(m.id)
         if self.store.log_searches:  # the calibration data: every candidate, and which ones were injected
             self.store._log_search(user_text, "context", hits, injected)

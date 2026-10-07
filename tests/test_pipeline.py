@@ -108,3 +108,16 @@ def test_subject_marker_is_a_store_constant(tmp_path):
     assert "«" not in llm2.calls[0][0]  # no subject configured: rule absent
     ks.close(); ks2.close()
 
+
+def test_render_subject_in_context(tmp_path):
+    ks = Keepsake(str(tmp_path / "r.db"), embedder=HashEmbedder(16))
+    p = Pipeline(ks, ScriptedLLM([ops({"op": "add", "text": "你最常用名單分頁", "tags": ["work"]})]),
+                 PipelineConfig(subject="你", render_subject="製作人"))
+    r = p.observe("名單分頁我最常用")
+    mid = r.applied[0]["id"]
+    assert ks.get(mid).text.startswith("你")  # stored as written
+    block = p.context_for("名單")
+    assert "製作人最常用名單分頁" in block and "你最常用" not in block  # rendered for her prompt
+    q = Pipeline(ks, ScriptedLLM([]), PipelineConfig(subject="你"))
+    assert "你最常用名單分頁" in q.context_for("名單")  # no render_subject: as stored
+    ks.close()

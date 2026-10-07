@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-10-07
+
+- `PipelineConfig.render_subject`: memories keep their stored subject word (556 now stores 你), and the
+  injected block renders it as the person's name or address term, so the prompt never confuses 你 with the
+  character herself and renaming never rewrites the store.
+
 ## 0.2.0 — 2026-10-03
 
 - **Two layers in one file.** `memories.layer` = `long` (tagged facts, trust labels, supersede /
