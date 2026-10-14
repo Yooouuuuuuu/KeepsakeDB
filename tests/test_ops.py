@@ -122,3 +122,30 @@ def test_cli_smoke(tmp_path, capsys):
     assert cli.main(["--db", p, "show", "1"]) == 1
     assert cli.main(["--db", p, "backup", "--dir", str(tmp_path / "bk"), "--text-only"]) == 0
     assert len(os.listdir(tmp_path / "bk")) == 1
+
+
+def test_hold_and_patch(tmp_path):
+    """A turn's memories can be held (kept, not shown, no hint) and later released as 舊帳 with a prefix."""
+    p = str(tmp_path / "h.db")
+    owner = Keepsake(p, embedder=HashEmbedder(16), owner=True)
+    pl = Pipeline(owner, ScriptedLLM([]))
+    mid = owner.add("他建議我走露一點的路線吸引流量", ["work"], meta={"turn_id": "t1"})
+    other = owner.add("他喜歡吃咖哩", ["food"], meta={"turn_id": "t2"})
+    assert owner.ids_for_turn("t1") == [mid]
+    assert "露一點" in pl.context_for("走露一點的路線", k=5)
+    # held: not injected, not hinted; still a search / observe candidate; the other memory unaffected
+    assert owner.hold(turn_id="t1", reason="委屈帳") == 1
+    assert owner.get(mid).held and not owner.get(other).held
+    block = pl.context_for("走露一點的路線", k=5)
+    assert "露一點" not in block and "archived" not in block
+    assert any(m.id == mid for m in owner.search("走露一點的路線", k=5, archived="include"))
+    # the command path (the psyche engine writes commands; the owner drains them)
+    reader = Keepsake(p, embedder=HashEmbedder(16))
+    reader.enqueue("hold", {"turn_id": "t1", "on": False, "reason": "forgiven"}, by="psyche")
+    reader.enqueue("patch", {"turn_id": "t1", "add_tags": ["舊帳"], "meta": {"old_account_date": "2026/10/13", "prefix": "（舊帳 2026/10/13）"}}, by="psyche")
+    owner.drain_commands()
+    m = owner.get(mid)
+    assert not m.held and "舊帳" in m.tags and m.meta["old_account_date"] == "2026/10/13"
+    block = pl.context_for("走露一點的路線", k=5)
+    assert "（舊帳 2026/10/13）他建議我走露一點的路線吸引流量" in block
+    assert owner.tags()["舊帳"] == 1

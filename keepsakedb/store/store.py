@@ -80,7 +80,7 @@ _LOG_COLS = ("id", "at", "query", "mode", "memory_id", "rank", "fused", "dense",
 _PLOG_COLS = ("id", "at", "user_text", "candidates", "raw", "applied", "skipped", "error", "model", "ms")
 _CMD_COLS = ("id", "op", "payload", "requested_at", "requested_by", "done_at", "result")
 _SNAP_RE = re.compile(r"^(?P<stem>.+)-(?P<ts>\d{8}-\d{6})(?P<text>-text)?\.db$")
-COMMAND_OPS = ("delete", "archive", "unarchive", "backup", "restore", "reindex", "reembed", "ping")
+COMMAND_OPS = ("delete", "archive", "unarchive", "hold", "patch", "backup", "restore", "reindex", "reembed", "ping")
 
 
 @dataclass
@@ -95,6 +95,12 @@ class Memory:
     created_at: float = 0.0
     updated_at: float = 0.0
     layer: str = "long"           # long | short (see LAYERS)
+
+    @property
+    def held(self) -> bool:
+        """Kept but not shown (meta.hold): the psyche engine holds a turn's memories while a hurt is on its
+        ledger. Unlike archived, nothing in the injection hints that they exist."""
+        return bool(self.meta.get("hold"))
     # search-time fields
     score: float = 0.0             # fused score
     dense: Optional[float] = None  # cosine, if the dense leg saw it
@@ -383,6 +389,57 @@ class Keepsake:
                                   (mid, reason, now))
                 if self.dense is not None:
                     self.dense.set_flag(mid, ACTIVE)
+        self._last_history_id = self._max_history_id()
+        return len(targets)
+
+    def ids_for_turn(self, turn_id: str) -> List[int]:
+        """The memories written from one conversation turn (meta.turn_id, stamped by the observe)."""
+        with self._lock:
+            self._before_read()
+            return [r[0] for r in self.conn.execute("SELECT id FROM memories WHERE json_extract(meta, '$.turn_id') = ?", (turn_id,))]
+
+    def hold(self, ids: Optional[Iterable[int]] = None, turn_id: Optional[str] = None, on: bool = True, reason: str = "") -> int:
+        """Hold = kept but not shown. The memories stay embedded and the observe still sees them as dedupe
+        candidates, but ``context_for`` and the tools skip them silently — unlike ``archive``, nothing hints
+        that they exist. The psyche engine holds a turn's memories while a hurt from it is on the ledger
+        (meta.hold = reason) and releases them when the ledger entry closes."""
+        targets = sorted(set(ids or []) | set(self.ids_for_turn(turn_id) if turn_id else []))
+        now = time.time()
+        with self._lock, self.conn:
+            for mid in targets:
+                row = self.conn.execute("SELECT meta FROM memories WHERE id=?", (mid,)).fetchone()
+                if row is None:
+                    continue
+                meta = json.loads(row[0] or "{}")
+                if on:
+                    meta["hold"] = reason or "hold"
+                else:
+                    meta.pop("hold", None)
+                self.conn.execute("UPDATE memories SET meta=?, updated_at=? WHERE id=?", (json.dumps(meta, ensure_ascii=False), now, mid))
+                self.conn.execute("INSERT INTO history(memory_id, op, reason, at) VALUES (?, ?, ?, ?)",
+                                  (mid, "hold" if on else "release", reason, now))
+        self._last_history_id = self._max_history_id()
+        return len(targets)
+
+    def patch(self, ids: Optional[Iterable[int]] = None, turn_id: Optional[str] = None, add_tags: Optional[Iterable[str]] = None,
+              meta: Optional[Dict[str, Any]] = None, reason: str = "") -> int:
+        """Add tags and merge meta fields without touching the text (no re-embedding). A forgiven hurt's
+        memories become 舊帳 this way: tag + the date it happened + a render prefix (meta.prefix)."""
+        targets = sorted(set(ids or []) | set(self.ids_for_turn(turn_id) if turn_id else []))
+        now = time.time()
+        with self._lock, self.conn:
+            for mid in targets:
+                row = self.conn.execute("SELECT tags, meta FROM memories WHERE id=?", (mid,)).fetchone()
+                if row is None:
+                    continue
+                tags = sorted(set(json.loads(row[0] or "[]")) | set(add_tags or []))
+                m = json.loads(row[1] or "{}")
+                m.update(meta or {})
+                self.conn.execute("UPDATE memories SET tags=?, meta=?, updated_at=? WHERE id=?",
+                                  (json.dumps(tags, ensure_ascii=False), json.dumps(m, ensure_ascii=False), now, mid))
+                self.conn.execute("DELETE FROM memory_tags WHERE memory_id=?", (mid,))
+                self.conn.executemany("INSERT INTO memory_tags(memory_id, tag) VALUES (?, ?)", [(mid, t) for t in tags])
+                self.conn.execute("INSERT INTO history(memory_id, op, reason, at) VALUES (?, 'patch', ?, ?)", (mid, reason, now))
         self._last_history_id = self._max_history_id()
         return len(targets)
 
@@ -898,6 +955,11 @@ class Keepsake:
             fn = {"delete": self.delete, "archive": self.archive, "unarchive": self.unarchive}[op]
             n = fn(ids=p.get("ids"), tag=p.get("tag"), reason=p.get("reason", ""))
             return {"count": n}
+        if op == "hold":
+            return {"count": self.hold(ids=p.get("ids"), turn_id=p.get("turn_id"), on=bool(p.get("on", True)), reason=p.get("reason", ""))}
+        if op == "patch":
+            return {"count": self.patch(ids=p.get("ids"), turn_id=p.get("turn_id"), add_tags=p.get("add_tags"), meta=p.get("meta"),
+                                        reason=p.get("reason", ""))}
         if op == "backup":
             return {"path": self.snapshot(p.get("dir"), text_only=p.get("text_only"), reason=p.get("reason", "command"))}
         if op == "restore":

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 — 2026-10-14
+
+- **Hold**: `Store.hold(ids | turn_id, on, reason)` (and the `hold` command) marks memories kept but not shown —
+  `meta.hold`. They stay embedded and remain observe candidates (no duplicates), but `context_for` and tools that
+  honour `Memory.held` skip them silently; unlike `archive`, nothing hints that they exist. The 556 psyche engine
+  holds a turn's memories while a hurt from that turn is on its ledger.
+- **Patch**: `Store.patch(ids | turn_id, add_tags, meta)` (and the `patch` command) adds tags and merges meta without
+  touching the text (no re-embedding). `meta.prefix` is rendered in front of the text by `context_for`
+  (e.g. 「（舊帳 2026/10/13）」 on a forgiven hurt that came back as memory).
+- `Store.ids_for_turn(turn_id)`: the memories one conversation turn produced (`meta.turn_id`).
+
 ## 0.3.0 — 2026-10-07
 
 - `Pipeline.observe(..., turn_id=, source=)` stamps `meta.turn_id` / `meta.source` on every memory the turn

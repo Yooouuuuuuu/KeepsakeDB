@@ -108,8 +108,8 @@ class Pipeline:
         lines = []
         injected = set()
         for m in hits:
-            if m.superseded:
-                continue  # a corrected fact is never injected, consent or not
+            if m.superseded or m.held:
+                continue  # a corrected fact is never injected, consent or not; a held one is kept but not shown
             if m.archived and not (set(m.tags) & open_tags):
                 topic = "/".join(m.tags) or "untagged"
                 reason = f" — {m.archive_reason}" if m.archive_reason else ""
@@ -119,11 +119,12 @@ class Pipeline:
             if m.dense is not None and m.dense < self.store.drop and m.bm25 is None:
                 continue
             tag_s = f" (tags: {', '.join(m.tags)})" if m.tags else ""
-            lines.append(f"- {'[high] ' if m.label == 'high' else ''}{show(m.text)}{tag_s}")
+            pre = str(m.meta.get("prefix") or "")   # e.g. 「（舊帳 2026/10/13）」 on a forgiven hurt
+            lines.append(f"- {'[high] ' if m.label == 'high' else ''}{pre}{show(m.text)}{tag_s}")
             injected.add(m.id)
         notes = []
         for m in found.get("short", []):
-            if m.archived or (m.dense is not None and m.dense < self.store.drop and m.bm25 is None):
+            if m.archived or m.held or (m.dense is not None and m.dense < self.store.drop and m.bm25 is None):
                 continue
             when = time.strftime("%m/%d", time.localtime(m.created_at))
             where = m.meta.get("surface")
