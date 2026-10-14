@@ -94,11 +94,11 @@ def test_observe_retries_once_on_empty_reply(tmp_path):
 def test_subject_marker_is_a_store_constant(tmp_path):
     ks = Keepsake(str(tmp_path / "s.db"), embedder=HashEmbedder(8))
     llm = ScriptedLLM([ops({"op": "noop"})])
-    p = Pipeline(ks, llm, PipelineConfig(subject="製作人", user_name="承宇"))
+    p = Pipeline(ks, llm, PipelineConfig(subject="我", user_name="承宇"))
     p.observe("我叫承宇")
     system = llm.calls[0][0]
-    assert "«製作人»" in system and '"承宇"' in system and ks._meta("subject") == "製作人"
-    ks.add("製作人最喜歡吃麻辣鍋", ["food"])
+    assert "«我»" in system and '"承宇"' in system and ks._meta("subject") == "我"
+    ks.add("我最喜歡吃麻辣鍋", ["food"])
     p2 = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(subject="使用者"))
     assert p2.subject == "使用者" and ks._meta("subject") == "使用者"  # configured marker wins: the store is migrated
     assert ks.search("麻辣鍋", k=1, mode="bm25")[0].text == "使用者最喜歡吃麻辣鍋"
@@ -112,12 +112,12 @@ def test_subject_marker_is_a_store_constant(tmp_path):
 def test_render_subject_in_context(tmp_path):
     ks = Keepsake(str(tmp_path / "r.db"), embedder=HashEmbedder(16))
     p = Pipeline(ks, ScriptedLLM([ops({"op": "add", "text": "你最常用名單分頁", "tags": ["work"]})]),
-                 PipelineConfig(subject="你", render_subject="製作人"))
+                 PipelineConfig(subject="你", render_subject="我"))
     r = p.observe("名單分頁我最常用")
     mid = r.applied[0]["id"]
     assert ks.get(mid).text.startswith("你")  # stored as written
     block = p.context_for("名單")
-    assert "製作人最常用名單分頁" in block and "你最常用" not in block  # rendered for her prompt
+    assert "我最常用名單分頁" in block and "你最常用" not in block  # rendered for her prompt
     q = Pipeline(ks, ScriptedLLM([]), PipelineConfig(subject="你"))
     assert "你最常用名單分頁" in q.context_for("名單")  # no render_subject: as stored
     ks.close()

@@ -114,11 +114,11 @@ def test_reindex_on_mismatch_and_subject_migration(tmp_path):
     pytest.importorskip("jieba")
     p = str(tmp_path / "m.db")
     k = Keepsake(p, embedder=HashEmbedder(8), tokenizer="bigram")
-    k.add("製作人最喜歡吃麻辣鍋", ["food"])
+    k.add("我最喜歡吃麻辣鍋", ["food"])
     k.close()
     k2 = Keepsake(p, embedder=HashEmbedder(8), tokenizer="jieba", reindex_on_mismatch=True)  # config changed
     assert k2._meta("tokenizer") == "jieba" and k2.search("麻辣鍋", mode="bm25")  # index rebuilt for the new tokenizer
-    assert k2.migrate_subject("製作人", "使用者") == 1
+    assert k2.migrate_subject("我", "使用者") == 1
     assert k2.get(1).text.startswith("使用者") and k2._meta("subject") == "使用者"
     assert k2.history(1)[-1]["op"] == "update"
     k2.close()
