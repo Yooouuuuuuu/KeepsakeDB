@@ -99,8 +99,8 @@ def test_subject_marker_is_a_store_constant(tmp_path):
     system = llm.calls[0][0]
     assert "«我»" in system and '"承宇"' in system and ks._meta("subject") == "我"
     ks.add("我最喜歡吃麻辣鍋", ["food"])
-    p2 = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(subject="使用者"))
-    assert p2.subject == "使用者" and ks._meta("subject") == "使用者"  # configured marker wins: the store is migrated
+    p2 = Pipeline(ks, ScriptedLLM([ops({"op": "noop"})]), PipelineConfig(subject="使用者", migrate_subject=True))
+    assert p2.subject == "使用者" and ks._meta("subject") == "使用者"  # a deliberate rename migrates the store (1.0.1: opt-in)
     assert ks.search("麻辣鍋", k=1, mode="bm25")[0].text == "使用者最喜歡吃麻辣鍋"
     ks2 = Keepsake(str(tmp_path / "n.db"), embedder=HashEmbedder(8))
     llm2 = ScriptedLLM([ops({"op": "noop"})])
@@ -137,3 +137,16 @@ def test_turn_stamp_and_annotate(tmp_path):
     assert ks.annotate_turn("nope", {"valence": 0}) == 0
     assert p.observe("隨便聊聊", "好啊").applied == [] or True  # a turn without a stamp still works
     ks.close()
+
+
+def test_second_pipeline_never_rewrites_the_subject(tmp_path):
+    """A counterpart pipeline (subject = another character) must leave the store's word and its texts alone."""
+    ks = Keepsake(str(tmp_path / "s.db"), embedder=HashEmbedder(16), owner=True)
+    main = Pipeline(ks, ScriptedLLM([]), PipelineConfig(subject="你", migrate_subject=True))
+    mid = ks.add("你養了一隻貓", ["pets"])
+    other = Pipeline(ks, ScriptedLLM([]), PipelineConfig(subject="子睿"))
+    assert ks._meta("subject") == "你" and ks.get(mid).text == "你養了一隻貓"
+    assert other.cfg.subject == "你" and main.subject == "你"
+    # the deliberate rename still works
+    Pipeline(ks, ScriptedLLM([]), PipelineConfig(subject="妳", migrate_subject=True))
+    assert ks._meta("subject") == "妳" and ks.get(mid).text == "妳養了一隻貓"

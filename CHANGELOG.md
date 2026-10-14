@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1 — 2026-10-14
+
+- **Bug fix (data safety).** `Pipeline` no longer rewrites the store's subject word just because its config names a
+  different one. That migration (the user renamed the subject word) now needs `PipelineConfig(migrate_subject=True)`;
+  any other pipeline on the same store — another counterpart, a tool — adopts the store's word instead. A second
+  pipeline with `subject="子睿"` used to turn every 「你…」 memory into 「子睿…」 and the main pipeline turned them back
+  (taking real 子睿 mentions with it); the 556 cast's stores were damaged this way on 2026-10-14.
+
 ## 1.0.0 — 2026-10-14
 
 - **API frozen.** 1.x = bug fixes and additive extras; the file schema is 2 and a breaking change is 2.0 (see README

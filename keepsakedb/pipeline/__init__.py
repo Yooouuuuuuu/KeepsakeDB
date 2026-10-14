@@ -34,6 +34,7 @@ class PipelineConfig:
     context_k: int = 5
     prefilter: Optional[Callable[[str], bool]] = None  # return False to skip the LLM (regex, length...)
     user_facts_only: bool = True
+    migrate_subject: bool = False  # True: a subject different from the store's record rewrites every memory (the user changed the word)
     subject: Optional[str] = None  # fixed subject word for memories about the user (e.g. 你); recorded in the store
     render_subject: Optional[str] = None  # how the subject reads when injected (their name / address term); None = as stored
     user_name: Optional[str] = None  # the user's current name (prompt-layer only; never the stored subject)
@@ -64,6 +65,10 @@ class Pipeline:
         self._lock = threading.Lock()
         # the subject marker is a per-store constant: the store's record wins over the config
         stored = store._meta("subject")
+        if stored and self.cfg.subject and self.cfg.subject != stored and not self.cfg.migrate_subject:
+            # a second pipeline on the same store (another counterpart, a tool) must never rewrite the file:
+            # it keeps the store's word for rendering and leaves the config's as an attribute only
+            self.cfg.subject = stored
         if stored and self.cfg.subject and self.cfg.subject != stored:
             # the Producer changed the marker in Settings: migrate the store (deliberate, logged)
             n = store.migrate_subject(stored, self.cfg.subject)
