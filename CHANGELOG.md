@@ -6,7 +6,8 @@
   "Status and stability" and DESIGN "Migration").
 - A 1.x package refuses to open a file whose `meta.schema_version` is newer (it used to open it anyway).
 - `keepsakedb.__version__` now matches the package version (it said 0.3.0 at 0.3.1); a test keeps them equal.
-- README and DESIGN brought up to date: layers, meta keys, hold / patch, the contract for other processes.
+- README rewritten short for the public repo; a LICENSE file (MIT) and the SPDX license field in pyproject;
+  DESIGN brought up to date: layers, meta keys, hold / patch, the contract for other processes.
 
 ## 0.3.1 — 2026-10-14
 

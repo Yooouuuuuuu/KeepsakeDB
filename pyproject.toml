@@ -4,7 +4,8 @@ version = "1.0.0"
 description = "A lightweight hybrid (dense + BM25) memory store for AI companions and agents, on a single SQLite file."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
@@ -19,7 +20,7 @@ dev = ["pytest>=8"]
 keepsake = "keepsakedb.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
