@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0 — 2026-10-14
+
+- **API frozen.** 1.x = bug fixes and additive extras; the file schema is 2 and a breaking change is 2.0 (see README
+  "Status and stability" and DESIGN "Migration").
+- A 1.x package refuses to open a file whose `meta.schema_version` is newer (it used to open it anyway).
+- `keepsakedb.__version__` now matches the package version (it said 0.3.0 at 0.3.1); a test keeps them equal.
+- README and DESIGN brought up to date: layers, meta keys, hold / patch, the contract for other processes.
+
 ## 0.3.1 — 2026-10-14
 
 - **Hold**: `Store.hold(ids | turn_id, on, reason)` (and the `hold` command) marks memories kept but not shown —

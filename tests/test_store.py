@@ -122,3 +122,24 @@ def test_reindex_on_mismatch_and_subject_migration(tmp_path):
     assert k2.get(1).text.startswith("使用者") and k2._meta("subject") == "使用者"
     assert k2.history(1)[-1]["op"] == "update"
     k2.close()
+
+
+def test_version_matches_packaging():
+    import re, keepsakedb
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "pyproject.toml"), encoding="utf-8") as f:
+        declared = re.search(r'^version = "([^"]+)"', f.read(), re.M).group(1)
+    assert keepsakedb.__version__ == declared
+
+
+def test_newer_schema_is_refused(tmp_path):
+    import sqlite3
+    from keepsakedb import Keepsake
+    from keepsakedb.store.store import SCHEMA_VERSION
+    p = str(tmp_path / "future.db")
+    Keepsake(p).close()
+    c = sqlite3.connect(p)
+    c.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION + 1),))
+    c.commit(); c.close()
+    with pytest.raises(ValueError):
+        Keepsake(p)

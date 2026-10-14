@@ -34,7 +34,7 @@ from .tokenize import Tokenizer, fts_query, get_tokenizer, index_string
 
 log = logging.getLogger("keepsakedb")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 2   # 1.x reads schema <= 2 (additive columns are migrated on open); a breaking change is KeepsakeDB 2.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -154,6 +154,9 @@ class Keepsake:
         self._layer_counts: Dict[str, int] = {}
         self._refresh_layer_counts()
         self._set_meta_default("schema_version", str(SCHEMA_VERSION))
+        stored_schema = int(self._meta("schema_version") or SCHEMA_VERSION)
+        if stored_schema > SCHEMA_VERSION:   # a 2.x file: this package cannot read it faithfully
+            raise ValueError(f"store schema {stored_schema} is newer than this KeepsakeDB (schema {SCHEMA_VERSION}); upgrade the package")
         self._set_meta_default("tokenizer", self.tok.name)
         self._pending_reindex: Optional[str] = None
         if self._meta("tokenizer") != self.tok.name:

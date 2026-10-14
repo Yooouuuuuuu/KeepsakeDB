@@ -71,16 +71,32 @@ ks.context("最近有什麼運動計畫")
   `ks.restore(path)`.
 - **CLI**: `keepsake --db her.db stats | list | search "…" --explain | log | delete 42 | backup`.
 
-## Status
+## Status and stability
 
-`0.1.0` — L1, L2 and L3 implemented and tested (`pytest`), with logs, the command queue,
-backups and the CLI ([`CHANGELOG.md`](CHANGELOG.md)). Benchmarked against
-Milvus Lite 3.2.1 with identical bge-m3 vectors on a zh-TW companion corpus: at 10k memories,
-hybrid recall@5 **0.88 vs 0.78** and **2 ms vs 53 ms** per query; one file, 49 MB vs 83 MB
-([`docs/BENCHMARK.md`](docs/BENCHMARK.md)). Python ≥ 3.11, dependency: numpy.
+`1.0.0` (2026-10-14) — **the API is frozen.** L1 (`Keepsake`, `Memory`), L2 (`Pipeline`, `PipelineConfig`,
+`ObserveResult`), L3 (`AgentMemory`), the embedder / LLM protocols, the command queue and the `keepsake` CLI keep
+their names and signatures through 1.x; 1.x releases are bug fixes and additive extras only. A change to the file
+schema (tables, columns, the meaning of `archived`, `meta` keys that readers rely on) is **2.0**: the file carries
+`meta.schema_version` (2 today), a 1.x package refuses a newer file, and a 2.0 package migrates a 1.x file on open.
+
+What 1.0 holds, all tested (`pytest`): hybrid search (dense + BM25, RRF), the CJK bigram tokenizer, two layers
+(long facts, short dated notes), trust labels, supersede / archive with reasons, **hold** (kept but not shown, no
+hint) and **patch** (tags + meta without re-embedding), turn stamps (`meta.turn_id` / `meta.source`) and
+after-the-fact annotation, a fixed subject word rendered as the person's name, logs (history, search, pipeline), the
+owner + command queue, backups with rotation, the CLI. Benchmarked against Milvus Lite 3.2.1 with identical bge-m3
+vectors on a zh-TW companion corpus: at 10k memories, hybrid recall@5 **0.88 vs 0.78** and **2 ms vs 53 ms** per
+query; one file, 49 MB vs 83 MB ([`docs/BENCHMARK.md`](docs/BENCHMARK.md)). Python ≥ 3.11, dependency: numpy.
+
+**Other processes and the file.** One process owns the store (`owner=True`); it keeps the dense index and the FTS in
+step with the rows. Anyone else may read the file under WAL at any time. Writes from outside go through the
+**command queue** (`INSERT INTO commands` — `delete`, `archive`, `unarchive`, `hold`, `patch`, `backup`, …; the owner
+drains it) or, for after-the-fact alignment only, a **meta patch** (`UPDATE memories SET meta = json_patch(meta, …)`:
+meta is read from the row each time, never cached). Never write `text`, `tags`, `archived` or `embedding` from
+outside: the owner's index would go stale. This is what 556 Production's psyche engine does from the same process.
 
 ```
-pip install -e ".[vec,jieba,pipeline]"      # optional extras
+pip install "keepsakedb @ git+https://github.com/Yooouuuuuuu/KeepsakeDB.git@v1.0.0"
+pip install -e ".[vec,jieba,pipeline]"      # development, optional extras
 pip install -e ".[bench]"                   # milvus-lite, pymilvus, rank-bm25 for the benchmarks
 ```
 

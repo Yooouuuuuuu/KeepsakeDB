@@ -21,10 +21,15 @@ history semantics, for people who run their own extraction.
 |---|---|
 | `memories` | `id`, `text`, `tokens` (pre-tokenized), `tags` (JSON), `meta` (JSON), `archived`, `archive_reason`, `created_at`, `updated_at`, `embedding` (float32 blob), `embedder` |
 | `memory_tags` | normalized `(memory_id, tag)` for fast tag queries |
-| `history` | append-only: `add / update / supersede / archive / unarchive / delete` with old/new text and reason |
+| `history` | append-only: `add / update / supersede / archive / unarchive / hold / release / patch / delete` with old/new text and reason |
 | `memories_fts` | FTS5 (`unicode61`) over `tokens` — the BM25 inverted index |
 | `memories_vec` | optional sqlite-vec `vec0(id, embedding float[d] cosine, flag)` |
-| `meta` | schema version, tokenizer name, dims |
+| `meta` | `schema_version` (2), tokenizer name, dims, the subject word, the owner heartbeat, last snapshot |
+
+Each memory has a `layer` (`long` facts with tags; `short` dated notes in a ring) and a JSON `meta` whose keys the
+callers own: `turn_id` / `source` (stamped by the observe), `valence` / `arousal` / `instance_ids` (annotated later by
+an emotion engine), `hold` (kept but not shown: `context_for` and tools that honour `Memory.held` skip it silently —
+unlike archive, no hint), `prefix` (rendered in front of the text, e.g. 「（舊帳 2026/10/13）」), `old_account_date`.
 
 One file per companion = Milvus's `user_id`/partition isolation without a server.
 
@@ -182,6 +187,9 @@ must cover the memory language.
 - Multi-process writers; ≥ 10⁶ memories (graduate to Milvus Standalone, same model).
 
 ## Migration
+
+**Versions.** 1.x reads schema ≤ 2 and migrates additive columns on open (`layer` was one); a file with a
+newer `schema_version` is refused. A breaking schema change is 2.0, which migrates a 1.x file on open.
 
 From mem0/Qdrant: read payloads, `add_many` with fresh embeddings — minutes at companion
 scale. Switching embedders: `reembed(new_embedder)`. Switching tokenizers: `reindex("jieba")`.
